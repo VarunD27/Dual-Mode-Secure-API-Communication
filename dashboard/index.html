@@ -52,6 +52,75 @@
         </div>
     </header>
 
+    <!-- Controls Section -->
+    <section class="controls-section">
+        <div class="chart-card">
+            <div class="chart-header">
+                <h2>Network Simulation</h2>
+                <span class="chart-badge badge-red">Manual Control</span>
+            </div>
+            <div class="control-panel">
+                <div class="control-group">
+                    <button id="run-auto-30" class="btn btn-primary">🚀 Run 30 Auto</button>
+                    <button id="stop-auto" class="btn btn-danger">⏹️ Stop</button>
+                </div>
+                <div class="control-group">
+                    <label for="tls-delay">TLS Delay:</label>
+                    <input type="number" id="tls-delay" value="20" min="0" max="500" step="10">
+                    <button id="apply-tls-delay" class="btn btn-primary">Apply</button>
+                </div>
+                <div class="control-group">
+                    <label for="tcp-delay">TCP Delay:</label>
+                    <input type="number" id="tcp-delay" value="20" min="0" max="500" step="10">
+                    <button id="apply-tcp-delay" class="btn btn-secondary">Apply</button>
+                </div>
+                <div class="control-group">
+                    <label for="error-rate">Error Rate (%):</label>
+                    <input type="number" id="error-rate" value="0" min="0" max="100" step="1">
+                    <button id="apply-error-rate" class="btn btn-warning">Apply</button>
+                </div>
+                <div class="control-group">
+                    <button id="probe-network" class="btn btn-info">🔍 Probe Network</button>
+                    <button id="reset-delays" class="btn btn-secondary">🔄 Reset</button>
+                    <button id="clear-logs" class="btn btn-danger">🗑️ Clear</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ── Network Configuration Display (hidden by default) ── -->
+    <section class="network-config" id="network-config" style="display: none;">
+        <div class="config-container">
+            <h3>🔍 Network Configuration</h3>
+            <div class="config-grid">
+                <div class="config-item">
+                    <span class="config-label">TLS RTT:</span>
+                    <span class="config-value" id="tls-rtt">—</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">TCP RTT:</span>
+                    <span class="config-value" id="tcp-rtt">—</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">TLS Handshake:</span>
+                    <span class="config-value" id="tls-handshake">—</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">TCP Handshake:</span>
+                    <span class="config-value" id="tcp-handshake">—</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">TLS Score:</span>
+                    <span class="config-value" id="tls-score">—</span>
+                </div>
+                <div class="config-item">
+                    <span class="config-label">TCP Score:</span>
+                    <span class="config-value" id="tcp-score">—</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- ── Stats Cards ── -->
     <section class="stats-grid" id="stats-section">
         <div class="stat-card" id="stat-total">
@@ -102,8 +171,32 @@
                 </svg>
             </div>
             <div class="stat-info">
-                <span class="stat-value" id="switch-count">0</span>
+                <span class="stat-value" id="protocol-switches">0</span>
                 <span class="stat-label">Protocol Switches</span>
+            </div>
+        </div>
+
+        <div class="stat-card" id="stat-security">
+            <div class="stat-icon stat-icon-green">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                </svg>
+            </div>
+            <div class="stat-info">
+                <span class="stat-value" id="security-score">0</span>
+                <span class="stat-label">Security Score</span>
+            </div>
+        </div>
+
+        <div class="stat-card" id="stat-reliability">
+            <div class="stat-icon stat-icon-red">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+                </svg>
+            </div>
+            <div class="stat-info">
+                <span class="stat-value" id="reliability-score">0</span>
+                <span class="stat-label">Reliability Score</span>
             </div>
         </div>
     </section>
@@ -155,6 +248,17 @@
             </div>
         </div>
 
+        <!-- Decision Component Breakdown -->
+        <div class="chart-card chart-wide" id="chart-decision-card">
+            <div class="chart-header">
+                <h2>Decision Component Breakdown</h2>
+                <span class="chart-badge badge-purple">Score Analysis</span>
+            </div>
+            <div class="chart-body">
+                <canvas id="chart-decision-breakdown"></canvas>
+            </div>
+        </div>
+
     </section>
 
     <!-- ── Request Log Table ── -->
@@ -170,6 +274,7 @@
                         <tr>
                             <th>#</th>
                             <th>Time</th>
+                            <th>Type</th>
                             <th>Protocol</th>
                             <th>Action</th>
                             <th>RTT (ms)</th>
@@ -182,7 +287,7 @@
                     </thead>
                     <tbody id="log-tbody">
                         <tr>
-                            <td colspan="10" class="empty-state">Waiting for data... Start the adaptive client to see results.</td>
+                            <td colspan="11" class="empty-state">Waiting for data... Start the adaptive client to see results.</td>
                         </tr>
                     </tbody>
                 </table>

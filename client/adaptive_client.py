@@ -184,8 +184,27 @@ def run_adaptive_client(
             response = session.send_request(action, payload)
             rtt = response.get("_rtt_ms", 0)
             payload_size = response.get("_payload_size", 0)
+            status = response.get("status", "unknown")
         except Exception as e:
             print(f"  [{i:3d}] ERROR: {e}")
+            # Log the error with error status
+            current_protocol = hysteresis.get_current_protocol()
+            log_entry = {
+                "request_id": i,
+                "timestamp": time.time(),
+                "protocol": current_protocol,
+                "action": action,
+                "rtt_ms": 0,
+                "handshake_time_ms": session._last_handshake_time.get(current_protocol, 0),
+                "payload_size": 0,
+                "tls_score": evaluation["tls_score"],
+                "tcp_score": evaluation["tcp_score"],
+                "status": "error",
+                "request_type": "AUTO",
+            }
+            log_entry.update(log_entry_components(log_entry, probe_results, evaluation))
+            save_log_entry(log_path, log_entry)
+            
             # Try to reconnect
             try:
                 session.connect(hysteresis.get_current_protocol())
@@ -201,11 +220,14 @@ def run_adaptive_client(
             "protocol": current_protocol,
             "action": action,
             "rtt_ms": rtt,
-            "handshake_time_ms": probe_results[current_protocol]["handshake_time"],
+            "handshake_time_ms": session._last_handshake_time.get(current_protocol, 0),
             "payload_size": payload_size,
             "tls_score": evaluation["tls_score"],
             "tcp_score": evaluation["tcp_score"],
-            "status": response.get("status", "unknown"),
+            "status": status,
+            "request_type": "AUTO",
+            "tls_components": evaluation.get("tls_components", {}),
+            "tcp_components": evaluation.get("tcp_components", {}),
         }
         save_log_entry(log_path, log_entry)
 
@@ -264,6 +286,8 @@ def main():
     )
     parser.add_argument("--requests", type=int, default=50,
                         help="Number of requests to send (default: 50)")
+    parser.add_argument("--count", type=int, default=50,
+                        help="Alias for --requests (default: 50)")
     parser.add_argument("--tls-host", default="localhost",
                         help="TLS server host (default: localhost)")
     parser.add_argument("--tls-port", type=int, default=5000,
@@ -280,8 +304,11 @@ def main():
                         help="High delay after switch (default: 180)")
     args = parser.parse_args()
 
+    # Use --count if provided, otherwise use --requests
+    num_requests = args.count if args.count != 50 else args.requests
+    
     run_adaptive_client(
-        num_requests=args.requests,
+        num_requests=num_requests,
         tls_host=args.tls_host,
         tls_port=args.tls_port,
         tcp_host=args.tcp_host,

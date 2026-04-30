@@ -7,6 +7,7 @@ import os
 import sys
 import ssl
 import argparse
+import random
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,11 +19,23 @@ app = Flask(__name__)
 
 # Default delay in milliseconds (configurable via CLI)
 ARTIFICIAL_DELAY_MS = 20.0
+# Packet loss simulation (0.0 = 0%, 1.0 = 100%)
+PACKET_LOSS_RATE = 0.0
 
 
 @app.before_request
-def apply_delay():
-    """Inject artificial delay before processing each request."""
+def apply_network_conditions():
+    """Inject artificial delay and simulate packet loss."""
+    # Simulate packet loss
+    if PACKET_LOSS_RATE > 0 and random.random() < PACKET_LOSS_RATE:
+        # Simulate packet loss by returning a server error
+        return jsonify({
+            "status": "error", 
+            "message": "Simulated packet loss",
+            "protocol": "TLS"
+        }), 500
+    
+    # Inject artificial delay
     inject_delay(ARTIFICIAL_DELAY_MS)
 
 
@@ -70,15 +83,27 @@ def set_delay():
     return jsonify({"status": "ok", "delay_ms": ARTIFICIAL_DELAY_MS})
 
 
+@app.route("/api/set_packet_loss", methods=["POST"])
+def set_packet_loss():
+    """Dynamically change packet loss simulation. Expects JSON: {"loss_rate": <0.0-1.0>}"""
+    global PACKET_LOSS_RATE
+    data = request.get_json(silent=True) or {}
+    new_rate = data.get("loss_rate", PACKET_LOSS_RATE)
+    PACKET_LOSS_RATE = max(0.0, min(1.0, float(new_rate)))  # Clamp between 0 and 1
+    return jsonify({"status": "ok", "packet_loss_rate": PACKET_LOSS_RATE})
+
+
 def main():
     global ARTIFICIAL_DELAY_MS
 
     parser = argparse.ArgumentParser(description="TLS Server (Flask HTTPS)")
     parser.add_argument("--port", type=int, default=5000, help="Port to listen on (default: 5000)")
     parser.add_argument("--delay", type=float, default=20.0, help="Artificial delay in ms (default: 20)")
+    parser.add_argument("--packet-loss", type=float, default=0.0, help="Packet loss rate 0.0-1.0 (default: 0.0)")
     args = parser.parse_args()
 
     ARTIFICIAL_DELAY_MS = args.delay
+    PACKET_LOSS_RATE = args.packet_loss
 
     # Paths to TLS certificates
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -96,6 +121,7 @@ def main():
 
     print(f"[TLS Server] Starting on https://localhost:{args.port}")
     print(f"[TLS Server] Artificial delay: {ARTIFICIAL_DELAY_MS}ms")
+    print(f"[TLS Server] Packet loss simulation: {PACKET_LOSS_RATE*100:.1f}%")
     print(f"[TLS Server] TLS 1.3 enabled")
     print(f"[TLS Server] Press Ctrl+C to stop\n")
 

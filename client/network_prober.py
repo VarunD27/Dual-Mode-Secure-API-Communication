@@ -9,6 +9,7 @@ import base64
 import struct
 import json
 import os
+import uuid
 
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -108,10 +109,15 @@ class NetworkProber:
             # Measure RTT with an encrypted health request
             start_rtt = time.perf_counter()
 
-            request_data = json.dumps({"action": "health"}).encode("utf-8")
+            request_data = {
+                "action": "health",
+                "nonce": str(uuid.uuid4()),  # Unique nonce for probing
+                "timestamp": time.time()     # Current timestamp
+            }
+            request_bytes = json.dumps(request_data).encode("utf-8")
             aesgcm = AESGCM(aes_key)
             nonce = os.urandom(12)
-            ciphertext = aesgcm.encrypt(nonce, request_data, None)
+            ciphertext = aesgcm.encrypt(nonce, request_bytes, None)
             encrypted = nonce + ciphertext
 
             # Send length-prefixed encrypted message
