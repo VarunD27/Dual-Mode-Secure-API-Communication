@@ -201,6 +201,7 @@ class SessionManager:
                 # Apply artificial delay if configured
                 delay_ms = self.simulation_config.get("tls_delay_ms", 0)
                 if delay_ms > 0:
+                    print(f"[Session Manager] Applying TLS delay: {delay_ms}ms")
                     time.sleep(delay_ms / 1000.0)
                     elapsed += delay_ms
                 
@@ -291,6 +292,7 @@ class SessionManager:
                 # Apply artificial delay if configured
                 delay_ms = self.simulation_config.get("tcp_delay_ms", 0)
                 if delay_ms > 0:
+                    print(f"[Session Manager] Applying TCP delay: {delay_ms}ms")
                     time.sleep(delay_ms / 1000.0)
                     elapsed += delay_ms
                 

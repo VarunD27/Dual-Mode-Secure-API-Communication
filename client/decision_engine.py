@@ -127,7 +127,23 @@ class DecisionEngine:
         # Normalize payload size (divide by 1000 to bring into similar scale as ms)
         payload_cost = metrics.get("payload_size", 0) / 1000.0
         success = metrics.get("success", True)
-        error_rate = metrics.get("error_rate", 0.0)
+        
+        # Load current simulation error rate if not provided in metrics
+        error_rate = metrics.get("error_rate")
+        if error_rate is None:
+            try:
+                import json
+                import os
+                project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                config_file = os.path.join(project_root, "logs", "simulation_config.json")
+                if os.path.exists(config_file):
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                        error_rate = config.get("error_rate", 0.0)
+                else:
+                    error_rate = 0.0
+            except Exception:
+                error_rate = 0.0
         
         # If request failed, apply heavy penalty
         if not success:

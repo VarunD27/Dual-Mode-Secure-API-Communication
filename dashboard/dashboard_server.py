@@ -17,6 +17,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 # Project paths
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DASHBOARD_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_DIR = os.path.join(PROJECT_ROOT, "logs")
 SESSION_LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "session_log.json")
 MANUAL_LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "manual_session_log.json")
 
@@ -47,6 +48,10 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         """Handle GET requests."""
         if self.path == "/api/logs":
             self._serve_logs()
+        elif self.path == "/api/get-settings":
+            self._get_settings()
+        elif self.path == "/logs/simulation_config.json":
+            self._serve_simulation_config()
         else:
             super().do_GET()
     
@@ -154,6 +159,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     
     def _probe_network(self):
         """Probe network and return configuration data."""
+        print(f"[Dashboard Debug] _probe_network method called")
         try:
             # Read any POST data
             content_length = int(self.headers.get('Content-Length', 0))
@@ -170,6 +176,35 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             engine = DecisionEngine()
             evaluation = engine.evaluate(results["TLS"], results["TCP"])
             
+            # Check if there are existing logs to determine if requests are running
+            all_logs = []
+            
+            # Load session logs
+            if os.path.exists(SESSION_LOG_FILE):
+                try:
+                    with open(SESSION_LOG_FILE, "r") as f:
+                        session_logs = json.load(f)
+                        all_logs.extend(session_logs)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            
+            # Load manual logs
+            if os.path.exists(MANUAL_LOG_FILE):
+                try:
+                    with open(MANUAL_LOG_FILE, "r") as f:
+                        manual_logs = json.load(f)
+                        all_logs.extend(manual_logs)
+                except (json.JSONDecodeError, IOError):
+                    pass
+            
+            has_logs = len(all_logs)
+            
+            # Debug the error_rate values
+            tls_error_rate = evaluation["tls_components"]["raw_metrics"]["error_rate"]
+            tcp_error_rate = evaluation["tcp_components"]["raw_metrics"]["error_rate"]
+            print(f"[Dashboard Debug] TLS error_rate: {tls_error_rate}")
+            print(f"[Dashboard Debug] TCP error_rate: {tcp_error_rate}")
+            
             data = {
                 "tls_rtt": results["TLS"].get("rtt", 0),
                 "tcp_rtt": results["TCP"].get("rtt", 0),
@@ -177,7 +212,26 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 "tcp_handshake": results["TCP"].get("handshake_time", 0),
                 "tls_score": evaluation["tls_score"],
                 "tcp_score": evaluation["tcp_score"],
+                # Raw values without weight multiplication
+                "tls_payload": results["TLS"].get("payload_size", 0),
+                "tcp_payload": results["TCP"].get("payload_size", 0),
+                "tls_security": 1.0,  # Fixed security value for TLS (lower is better)
+                "tcp_security": 5.0,  # Fixed security value for TCP (higher is better)
+                # Include reliability scores (1.0 for perfect, lower for errors) instead of costs
+                "tls_reliability": 1.0 - tls_error_rate,
+                "tcp_reliability": 1.0 - tcp_error_rate,
+                # Add log count for detection
+                "has_logs": has_logs,
             }
+            
+            # Debug logging to see what data is being sent
+            print(f"[Dashboard Debug] Data being sent: {data}")
+            print(f"[Dashboard Debug] TLS payload: {data['tls_payload']}")
+            print(f"[Dashboard Debug] TCP payload: {data['tcp_payload']}")
+            print(f"[Dashboard Debug] TLS security: {data['tls_security']}")
+            print(f"[Dashboard Debug] TCP security: {data['tcp_security']}")
+            print(f"[Dashboard Debug] TLS reliability: {data['tls_reliability']}")
+            print(f"[Dashboard Debug] TCP reliability: {data['tcp_reliability']}")
             
             response = json.dumps({"success": True, "data": data})
             self.send_response(200)
@@ -192,6 +246,29 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             print(f"[Dashboard] Probe network error: {e}")
             # Fallback to current settings
             try:
+                # Load logs for fallback case
+                all_logs = []
+                
+                # Load session logs
+                if os.path.exists(SESSION_LOG_FILE):
+                    try:
+                        with open(SESSION_LOG_FILE, "r") as f:
+                            session_logs = json.load(f)
+                            all_logs.extend(session_logs)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                
+                # Load manual logs
+                if os.path.exists(MANUAL_LOG_FILE):
+                    try:
+                        with open(MANUAL_LOG_FILE, "r") as f:
+                            manual_logs = json.load(f)
+                            all_logs.extend(manual_logs)
+                    except (json.JSONDecodeError, IOError):
+                        pass
+                
+                has_logs = len(all_logs)
+                
                 data = {
                     "tls_rtt": 0,
                     "tcp_rtt": 0,
@@ -199,6 +276,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     "tcp_handshake": 0,
                     "tls_score": 0,
                     "tcp_score": 0,
+                    "tls_payload": 0,
+                    "tcp_payload": 0,
+                    "tls_security": 1.0,
+                    "tcp_security": 5.0,
+                    "tls_reliability": 1.0,  # Perfect reliability when no data
+                    "tcp_reliability": 1.0,  # Perfect reliability when no data
+                    "has_logs": has_logs,
                 }
                 response = json.dumps({"success": True, "data": data})
                 self.send_response(200)
@@ -336,18 +420,26 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(error_response.encode())
     
-    def _set_error_rate(self):
+    def _set_error_rate(self, error_rate=None):
         """Set error rate for simulation."""
         try:
             global error_rate_simulation
-            content_length = int(self.headers['Content-Length'])
-            post_data = self.rfile.read(content_length)
-            data = json.loads(post_data.decode('utf-8'))
             
-            error_rate = data.get('error_rate', 0.0)
-            # Clamp between 0 and 1
-            error_rate = max(0.0, min(1.0, error_rate))
-            error_rate_simulation = error_rate
+            # If error_rate is provided as parameter, use it
+            if error_rate is not None:
+                # Clamp between 0 and 1
+                error_rate = max(0.0, min(1.0, error_rate))
+                error_rate_simulation = error_rate
+            else:
+                # Read from request body
+                content_length = int(self.headers['Content-Length'])
+                post_data = self.rfile.read(content_length)
+                data = json.loads(post_data.decode('utf-8'))
+                
+                error_rate = data.get('error_rate', 0.0)
+                # Clamp between 0 and 1
+                error_rate = max(0.0, min(1.0, error_rate))
+                error_rate_simulation = error_rate
             
             # Write to config file for clients to read
             self._write_simulation_config()
@@ -371,14 +463,58 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(error_response.encode())
     
+    def _serve_simulation_config(self):
+        """Serve the simulation config file."""
+        try:
+            config_file = os.path.join(LOG_DIR, "simulation_config.json")
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    content = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(content))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(content.encode())
+            else:
+                # Return default config if file doesn't exist
+                default_config = {"tls_delay_ms": 0, "tcp_delay_ms": 0, "error_rate": 0.0}
+                content = json.dumps(default_config)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", len(content))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(content.encode())
+        except Exception as e:
+            error_response = json.dumps({"error": str(e)})
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", len(error_response))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(error_response.encode())
+    
     def _get_settings(self):
         """Get current delay and error rate settings."""
         try:
-            settings = {
-                "tls_delay_ms": tls_delay_ms,
-                "tcp_delay_ms": tcp_delay_ms,
-                "error_rate": error_rate_simulation
-            }
+            # Read directly from simulation config file
+            config_file = os.path.join(LOG_DIR, "simulation_config.json")
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
+                    settings = {
+                        "tls_delay_ms": config.get("tls_delay_ms", 0),
+                        "tcp_delay_ms": config.get("tcp_delay_ms", 0),
+                        "error_rate": config.get("error_rate", 0.0)
+                    }
+            else:
+                # Fallback to defaults
+                settings = {
+                    "tls_delay_ms": 0,
+                    "tcp_delay_ms": 0,
+                    "error_rate": 0.0
+                }
             
             response = json.dumps({"success": True, "settings": settings})
             self.send_response(200)
@@ -398,7 +534,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self.wfile.write(error_response.encode())
     
     def _clear_logs(self):
-        """Clear all logs from backend files."""
+        """Clear all logs and reset network conditions from backend files."""
         try:
             # Clear session log
             if os.path.exists(SESSION_LOG_FILE):
@@ -410,7 +546,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 with open(MANUAL_LOG_FILE, 'w') as f:
                     f.write('[]')
             
-            response = json.dumps({"success": True, "message": "All logs cleared successfully"})
+            # Reset error rate to 0
+            self._set_error_rate(error_rate=0.0)
+            
+            # Reset delays to 0
+            self._reset_delays()
+            
+            response = json.dumps({"success": True, "message": "All logs and network conditions reset successfully"})
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(response))

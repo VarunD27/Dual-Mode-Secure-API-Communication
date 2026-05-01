@@ -498,7 +498,14 @@ function updateDashboard(logs) {
     // ── Update Stats Cards ──
     document.getElementById('total-requests').textContent = logs.length;
     document.getElementById('current-protocol').textContent = lastLog.protocol;
-    document.getElementById('avg-rtt').textContent = `${(totalRtt / logs.length).toFixed(1)}ms`;
+    
+    // Calculate protocol-specific RTT averages
+    const tlsAvgRtt = tlsRtts.length > 0 ? tlsRtts.reduce((a, b) => a + b, 0) / tlsRtts.length : 0;
+    const tcpAvgRtt = tcpRtts.length > 0 ? tcpRtts.reduce((a, b) => a + b, 0) / tcpRtts.length : 0;
+    
+    // Show RTT for current protocol
+    const currentAvgRtt = lastLog.protocol === 'TLS' ? tlsAvgRtt : tcpAvgRtt;
+    document.getElementById('avg-rtt').textContent = `${currentAvgRtt.toFixed(1)}ms`;
     document.getElementById('protocol-switches').textContent = switchCount;
     
     // Update security and reliability scores from components if available
@@ -715,6 +722,33 @@ function setupControls() {
         }
     });
     
+    // Function to update reliability score card based on current error rate
+    async function updateReliabilityScoreCard() {
+        try {
+            // Try to get from dashboard API first
+            const response = await fetch('/api/get-settings');
+            if (response.ok) {
+                const data = await response.json();
+                const errorRate = data.settings.error_rate || 0.0;
+                const reliabilityScore = 1.0 - errorRate;
+                document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
+                console.log(`[Dashboard] Updated reliability score to ${reliabilityScore.toFixed(3)} (error rate: ${errorRate})`);
+            } else {
+                // Fallback: read directly from simulation config
+                const configResponse = await fetch('/logs/simulation_config.json');
+                if (configResponse.ok) {
+                    const config = await configResponse.json();
+                    const errorRate = config.error_rate || 0.0;
+                    const reliabilityScore = 1.0 - errorRate;
+                    document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
+                    console.log(`[Dashboard] Updated reliability score to ${reliabilityScore.toFixed(3)} (error rate: ${errorRate}) - from config file`);
+                }
+            }
+        } catch (error) {
+            console.error('Failed to update reliability score:', error);
+        }
+    }
+
     // TLS Delay Button
     document.getElementById('apply-tls-delay').addEventListener('click', async () => {
         const delay = document.getElementById('tls-delay').value;
@@ -726,6 +760,8 @@ function setupControls() {
             });
             if (response.ok) {
                 showNotification(`TLS delay set to ${delay}ms`, 'success');
+                // Update reliability score card when delay is applied
+                await updateReliabilityScoreCard();
             }
         } catch (error) {
             showNotification('Failed to set TLS delay', 'error');
@@ -743,6 +779,8 @@ function setupControls() {
             });
             if (response.ok) {
                 showNotification(`TCP delay set to ${delay}ms`, 'success');
+                // Update reliability score card when delay is applied
+                await updateReliabilityScoreCard();
             }
         } catch (error) {
             showNotification('Failed to set TCP delay', 'error');
@@ -760,6 +798,8 @@ function setupControls() {
             });
             if (response.ok) {
                 showNotification(`Error rate set to ${errorRate}%`, 'success');
+                // Update reliability score card when error rate is changed
+                await updateReliabilityScoreCard();
             }
         } catch (error) {
             showNotification('Failed to set error rate', 'error');
@@ -774,7 +814,10 @@ function setupControls() {
                 document.getElementById('tls-delay').value = 0;
                 document.getElementById('tcp-delay').value = 0;
                 document.getElementById('error-rate').value = 0;
-                showNotification('Delays reset to default', 'success');
+                showNotification('Network reset to default', 'success');
+                // Reset reliability score card to 1.0 when reset is clicked
+                document.getElementById('reliability-score').textContent = '1.000';
+                console.log('[Dashboard] Reset reliability score to 1.000');
             }
         } catch (error) {
             showNotification('Failed to reset delays', 'error');
@@ -802,7 +845,7 @@ function setupControls() {
     
     // Clear Logs Button
     document.getElementById('clear-logs').addEventListener('click', async () => {
-        if (confirm('Are you sure you want to clear all logs? This cannot be undone.')) {
+        if (confirm('Are you sure you want to clear all logs and reset network conditions? This cannot be undone.')) {
             try {
                 const response = await fetch('/api/clear-logs', { method: 'POST' });
                 if (response.ok) {
@@ -845,12 +888,12 @@ function setupControls() {
                     document.getElementById('avg-rtt').textContent = '0ms';
                     document.getElementById('protocol-switches').textContent = '0';
                     document.getElementById('security-score').textContent = '0.000';
-                    document.getElementById('reliability-score').textContent = '0.000';
+                    document.getElementById('reliability-score').textContent = '1.000'; // Reset to perfect reliability
                     
                     // Clear log table
                     document.getElementById('log-tbody').innerHTML = '';
                     
-                    showNotification('All logs cleared successfully', 'success');
+                    showNotification('All logs and network conditions reset successfully', 'success');
                 } else {
                     showNotification('Failed to clear logs', 'error');
                 }
@@ -933,22 +976,80 @@ function showNotification(message, type = 'info') {
 }
 
 function displayNetworkConfig(data) {
-    // Update the configuration display
-    document.getElementById('tls-rtt').textContent = `${data.tls_rtt?.toFixed(2) || '—'} ms`;
-    document.getElementById('tcp-rtt').textContent = `${data.tcp_rtt?.toFixed(2) || '—'} ms`;
-    document.getElementById('tls-handshake').textContent = `${data.tls_handshake?.toFixed(2) || '—'} ms`;
-    document.getElementById('tcp-handshake').textContent = `${data.tcp_handshake?.toFixed(2) || '—'} ms`;
-    document.getElementById('tls-score').textContent = (data.tls_score?.toFixed(2) || '—');
-    document.getElementById('tcp-score').textContent = (data.tcp_score?.toFixed(2) || '—');
+    // Debug logging to see what data is being received
+    console.log('[Dashboard Debug] Data received:', data);
+    console.log('[Dashboard Debug] TLS payload:', data.tls_payload);
+    console.log('[Dashboard Debug] TCP payload:', data.tcp_payload);
+    console.log('[Dashboard Debug] TLS security:', data.tls_security);
+    console.log('[Dashboard Debug] TCP security:', data.tcp_security);
+    console.log('[Dashboard Debug] TLS reliability:', data.tls_reliability);
+    console.log('[Dashboard Debug] TCP reliability:', data.tcp_reliability);
+    
+    // Determine table structure based on whether requests are running
+    const isRunning = isAutoRunning || (data.has_logs && data.has_logs > 0);
+    const showComprehensive = isRunning;
+    
+    // Build table headers dynamically
+    const thead = document.getElementById('config-thead');
+    const tbody = document.getElementById('config-tbody');
+    
+    // Clear existing content
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+    
+    // Create headers based on state
+    const headerRow = document.createElement('tr');
+    const headers = showComprehensive 
+        ? ['Protocol', 'RTT', 'Handshake', 'Payload', 'Security', 'Reliability', 'Final Score']
+        : ['Protocol', 'RTT', 'Handshake', 'Security', 'Final Score'];
+    
+    headers.forEach(header => {
+        const th = document.createElement('th');
+        th.textContent = header;
+        headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    
+    // Create TLS row
+    const tlsRow = document.createElement('tr');
+    tlsRow.innerHTML = `
+        <td class="protocol-cell tls-protocol">🔒 TLS</td>
+        <td class="value-cell">${data.tls_rtt !== undefined ? `${data.tls_rtt.toFixed(2)} ms` : '—'}</td>
+        <td class="value-cell">${data.tls_handshake !== undefined ? `${data.tls_handshake.toFixed(2)} ms` : '—'}</td>
+        ${showComprehensive ? `<td class="value-cell">${data.tls_payload !== undefined ? `${data.tls_payload} B` : '—'}</td>` : ''}
+        <td class="value-cell">${data.tls_security !== undefined ? data.tls_security.toFixed(1) : '—'}</td>
+        ${showComprehensive ? `<td class="value-cell">${data.tls_reliability !== undefined ? data.tls_reliability.toFixed(2) : '—'}</td>` : ''}
+        <td class="value-cell final-score">${data.tls_score !== undefined ? data.tls_score.toFixed(2) : '—'}</td>
+    `;
+    tbody.appendChild(tlsRow);
+    
+    // Create TCP row
+    const tcpRow = document.createElement('tr');
+    tcpRow.innerHTML = `
+        <td class="protocol-cell tcp-protocol">⚡ TCP</td>
+        <td class="value-cell">${data.tcp_rtt !== undefined ? `${data.tcp_rtt.toFixed(2)} ms` : '—'}</td>
+        <td class="value-cell">${data.tcp_handshake !== undefined ? `${data.tcp_handshake.toFixed(2)} ms` : '—'}</td>
+        ${showComprehensive ? `<td class="value-cell">${data.tcp_payload !== undefined ? `${data.tcp_payload} B` : '—'}</td>` : ''}
+        <td class="value-cell">${data.tcp_security !== undefined ? data.tcp_security.toFixed(1) : '—'}</td>
+        ${showComprehensive ? `<td class="value-cell">${data.tcp_reliability !== undefined ? data.tcp_reliability.toFixed(2) : '—'}</td>` : ''}
+        <td class="value-cell final-score">${data.tcp_score !== undefined ? data.tcp_score.toFixed(2) : '—'}</td>
+    `;
+    tbody.appendChild(tcpRow);
+    
+    // Update title based on state
+    const title = document.getElementById('config-title');
+    title.textContent = showComprehensive 
+        ? '🔍 Network Configuration - Comprehensive Analysis (Running Requests)'
+        : '🔍 Network Configuration - Basic Analysis (Idle)';
     
     // Show the configuration section
     const configSection = document.getElementById('network-config');
     configSection.style.display = 'block';
     
-    // Hide after 10 seconds
+    // Hide after 15 seconds (increased for more data to read)
     setTimeout(() => {
         configSection.style.display = 'none';
-    }, 10000);
+    }, 15000);
 }
 
 function removeNotification(notification) {

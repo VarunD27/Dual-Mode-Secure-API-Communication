@@ -50,7 +50,6 @@ class NetworkProber:
         delay_ms = config.get("tls_delay_ms", 0)
         error_rate = config.get("error_rate", 0.0)
 
-        # Simulate error
         if error_rate > 0 and random.random() < error_rate:
             return {
                 "protocol": "TLS",
@@ -58,8 +57,7 @@ class NetworkProber:
                 "rtt": 9999.0,
                 "payload_size": 0,
                 "success": False,
-                "error": f"Simulated error (TLS) - {error_rate * 100:.1f}% error rate",
-                "error_rate": error_rate,
+                "error": "Simulated error"
             }
 
         try:
@@ -78,16 +76,15 @@ class NetworkProber:
 
             # Measure RTT with a second request (connection already established)
             start_rtt = time.perf_counter()
-            response2 = session.get(
-                f"{self.tls_url}/api/health",
+            response = session.get(
+                f"{self.tls_url}/api/data",
                 verify=False,
                 timeout=10
             )
             end_rtt = time.perf_counter()
             rtt = (end_rtt - start_rtt) * 1000 + delay_ms  # ms
 
-            payload_size = len(response2.content)
-            session.close()
+            payload_size = len(response.content)
 
             return {
                 "protocol": "TLS",
@@ -95,8 +92,9 @@ class NetworkProber:
                 "rtt": round(rtt, 3),
                 "payload_size": payload_size,
                 "success": True,
-                "error_rate": error_rate,
+                "error": None
             }
+
         except Exception as e:
             return {
                 "protocol": "TLS",
@@ -104,8 +102,7 @@ class NetworkProber:
                 "rtt": 9999.0,
                 "payload_size": 0,
                 "success": False,
-                "error": str(e),
-                "error_rate": error_rate,
+                "error": str(e)
             }
 
     def probe_tcp(self) -> dict:

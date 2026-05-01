@@ -91,32 +91,16 @@
     <!-- ── Network Configuration Display (hidden by default) ── -->
     <section class="network-config" id="network-config" style="display: none;">
         <div class="config-container">
-            <h3>🔍 Network Configuration</h3>
-            <div class="config-grid">
-                <div class="config-item">
-                    <span class="config-label">TLS RTT:</span>
-                    <span class="config-value" id="tls-rtt">—</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">TCP RTT:</span>
-                    <span class="config-value" id="tcp-rtt">—</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">TLS Handshake:</span>
-                    <span class="config-value" id="tls-handshake">—</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">TCP Handshake:</span>
-                    <span class="config-value" id="tcp-handshake">—</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">TLS Score:</span>
-                    <span class="config-value" id="tls-score">—</span>
-                </div>
-                <div class="config-item">
-                    <span class="config-label">TCP Score:</span>
-                    <span class="config-value" id="tcp-score">—</span>
-                </div>
+            <h3 id="config-title">🔍 Network Configuration - Decision Engine Analysis</h3>
+            <div class="config-table-wrapper">
+                <table class="config-table" id="config-table">
+                    <thead id="config-thead">
+                        <!-- Dynamic headers will be inserted here -->
+                    </thead>
+                    <tbody id="config-tbody">
+                        <!-- Dynamic rows will be inserted here -->
+                    </tbody>
+                </table>
             </div>
         </div>
     </section>
@@ -300,6 +284,6 @@
         <p>Dual-Mode Secure API Communication — NPS Lab 6th Sem &nbsp;|&nbsp; RV College of Engineering &nbsp;|&nbsp; Varun Dhandharia &amp; Sridula O S</p>
     </footer>
 
-    <script src="script.js"></script>
+    <script src="script.js?v=1.1"></script>
 </body>
 </html>

@@ -711,37 +711,91 @@ tr:hover td {
     gap: 0.5rem;
 }
 
-.config-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-}
-
-.config-item {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.75rem;
-    background: var(--bg-secondary);
+.config-table-wrapper {
+    overflow-x: auto;
     border-radius: 8px;
     border: 1px solid var(--glass-border);
 }
 
-.config-label {
-    color: var(--text-secondary);
-    font-size: 0.9rem;
-    font-weight: 500;
+.config-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 
-.config-value {
+.config-table th {
+    background: rgba(99, 102, 241, 0.15);
+    color: var(--text-primary);
+    font-weight: 600;
+    padding: 1rem;
+    text-align: center;
+    font-size: 0.85rem;
+    border-bottom: 2px solid var(--glass-border);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.config-table td {
+    padding: 1rem;
     color: var(--text-primary);
     font-size: 0.9rem;
-    font-weight: 600;
-    font-family: 'JetBrains Mono', monospace;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    vertical-align: middle;
 }
 
-.config-value.highlight {
+.config-table tr:last-child td {
+    border-bottom: none;
+}
+
+.config-table tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.protocol-cell {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.tls-protocol {
+    color: var(--accent-blue);
+}
+
+.tcp-protocol {
     color: var(--accent-cyan);
+}
+
+.value-cell {
+    font-family: 'JetBrains Mono', monospace;
+    font-weight: 600;
+    text-align: center;
+    padding: 0.75rem 0.5rem !important;
+    min-width: 90px;
+    font-size: 0.85rem;
+}
+
+/* Adjust column widths for different table structures */
+.config-table:has(thead th:nth-child(7)) .value-cell {
+    min-width: 80px;
+    font-size: 0.8rem;
+}
+
+.config-table:has(thead th:nth-child(5)) .value-cell {
+    min-width: 110px;
+    font-size: 0.85rem;
+}
+
+.final-score {
+    font-weight: 700;
+    color: var(--accent-green);
+    background: rgba(16, 185, 129, 0.1);
+    border-radius: 4px;
+    font-size: 0.9rem;
 }
 
 @keyframes slideDown {

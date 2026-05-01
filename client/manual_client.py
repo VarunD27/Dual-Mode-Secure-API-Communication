@@ -56,9 +56,18 @@ class ManualClient:
     
     def _log_request(self, protocol: str, action: str, response: Dict[str, Any]):
         """Log request details to file."""
-        # Get current handshake time from session (only on first request after connect/switch)
+        # Track if this is the first request after protocol switch
+        is_first_request = False
+        if not hasattr(self, '_last_logged_protocol'):
+            self._last_logged_protocol = None
+            
+        if self._last_logged_protocol != protocol:
+            self._last_logged_protocol = protocol
+            is_first_request = True
+        
+        # Get handshake time only on first request after protocol switch
         handshake_time = 0
-        if hasattr(self.session, '_last_handshake_time'):
+        if is_first_request and hasattr(self.session, '_last_handshake_time'):
             handshake_time = self.session._last_handshake_time.get(protocol, 0)
         
         # Use evaluated scores if available
