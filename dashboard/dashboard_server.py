@@ -33,6 +33,9 @@ tls_delay_ms = 0
 tcp_delay_ms = 0
 error_rate_simulation = 0.0  # 0% error rate by default
 
+# Stop flag file
+STOP_FLAG_FILE = os.path.join(PROJECT_ROOT, "logs", "stop_flag.json")
+
 class DashboardHandler(SimpleHTTPRequestHandler):
     """Custom HTTP handler that serves dashboard files and the logs API."""
 
@@ -152,20 +155,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     def _probe_network(self):
         """Probe network and return configuration data."""
         try:
-            # Read any POST data (ignore it for now)
+            # Read any POST data
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 self.rfile.read(content_length)
             
-            # For now, return mock data to avoid import issues
-            # TODO: Implement actual network probing
+            # Perform actual probing
+            sys.path.insert(0, PROJECT_ROOT)
+            from client.network_prober import NetworkProber
+            from client.decision_engine import DecisionEngine
+            
+            prober = NetworkProber()
+            results = prober.probe_both()
+            engine = DecisionEngine()
+            evaluation = engine.evaluate(results["TLS"], results["TCP"])
+            
             data = {
-                "tls_rtt": 2300 + (100 * (0.5 - random.random())),  # Add some variation
-                "tcp_rtt": 50 + (10 * (0.5 - random.random())),
-                "tls_handshake": 2300 + (100 * (0.5 - random.random())),
-                "tcp_handshake": 10 + (5 * (0.5 - random.random())),
-                "tls_score": 0.43 + (0.1 * (0.5 - random.random())),
-                "tcp_score": 16.67 + (2 * (0.5 - random.random()))
+                "tls_rtt": results["TLS"].get("rtt", 0),
+                "tcp_rtt": results["TCP"].get("rtt", 0),
+                "tls_handshake": results["TLS"].get("handshake_time", 0),
+                "tcp_handshake": results["TCP"].get("handshake_time", 0),
+                "tls_score": evaluation["tls_score"],
+                "tcp_score": evaluation["tcp_score"],
             }
             
             response = json.dumps({"success": True, "data": data})
@@ -179,13 +190,31 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             
         except Exception as e:
             print(f"[Dashboard] Probe network error: {e}")
-            error_response = json.dumps({"success": False, "error": str(e)})
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(error_response)))
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(error_response.encode())
+            # Fallback to current settings
+            try:
+                data = {
+                    "tls_rtt": 0,
+                    "tcp_rtt": 0,
+                    "tls_handshake": 0,
+                    "tcp_handshake": 0,
+                    "tls_score": 0,
+                    "tcp_score": 0,
+                }
+                response = json.dumps({"success": True, "data": data})
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(response)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(response.encode())
+            except Exception as fallback_err:
+                error_response = json.dumps({"success": False, "error": str(fallback_err)})
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(error_response)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(error_response.encode())
     
     def _reset_delays(self):
         """Reset all delays to default."""
@@ -198,9 +227,28 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             # Write to config file for clients to read
             self._write_simulation_config()
             
+            # Also reset TLS server internal delay and packet loss via its API
+            try:
+                import requests as req_lib
+                req_lib.post(
+                    "https://localhost:5000/api/set_delay",
+                    json={"delay_ms": 0},
+                    verify=False,
+                    timeout=3,
+                )
+                req_lib.post(
+                    "https://localhost:5000/api/set_packet_loss",
+                    json={"loss_rate": 0.0},
+                    verify=False,
+                    timeout=3,
+                )
+                print("[Dashboard] Reset TLS server delay and packet loss to 0")
+            except Exception as api_err:
+                print(f"[Dashboard] Could not reset TLS server via API: {api_err}")
+            
             print(f"[Dashboard] Resetting delays to 0ms and error rate to 0%")
             
-            response = json.dumps({"success": True, "message": "Delays reset to 0ms"})
+            response = json.dumps({"success": True, "message": "Delays and error rate reset to 0"})
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", len(response))
@@ -222,6 +270,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         try:
             import threading
             global auto_client_process, auto_run_state
+            
+            # Clear stop flag
+            try:
+                with open(STOP_FLAG_FILE, 'w') as f:
+                    json.dump({"stop": False}, f)
+            except Exception:
+                pass
             
             # Kill any existing auto client process
             if auto_client_process and auto_client_process.poll() is None:
@@ -377,6 +432,13 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         try:
             global auto_client_process
             
+            # Write stop flag first (clean signal)
+            try:
+                with open(STOP_FLAG_FILE, 'w') as f:
+                    json.dump({"stop": True}, f)
+            except Exception:
+                pass
+            
             if auto_client_process and auto_client_process.poll() is None:
                 # Try to terminate the process and all its children
                 try:
@@ -434,6 +496,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"[Dashboard] Failed to write simulation config: {e}")
     
+    def _kill_process_tree(self, pid):
+        """Kill a process and all its children."""
+        try:
+            if os.name == 'nt':
+                subprocess.call(['taskkill', '/F', '/T', '/PID', str(pid)])
+            else:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception:
+            pass
+
     def log_message(self, format, *args):
         """Suppress default access logs for cleaner output."""
         pass

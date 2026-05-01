@@ -59,6 +59,47 @@ def clear_logs(log_path):
         json.dump([], f)
 
 
+def get_stop_flag_path():
+    """Get path to the stop flag file."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logs_dir = os.path.join(project_root, "logs")
+    os.makedirs(logs_dir, exist_ok=True)
+    return os.path.join(logs_dir, "stop_flag.json")
+
+
+def check_stop_flag():
+    """Check if stop flag is set."""
+    try:
+        stop_file = get_stop_flag_path()
+        if os.path.exists(stop_file):
+            with open(stop_file, "r") as f:
+                data = json.load(f)
+                return data.get("stop", False)
+    except Exception:
+        pass
+    return False
+
+
+def clear_stop_flag():
+    """Clear the stop flag."""
+    try:
+        stop_file = get_stop_flag_path()
+        with open(stop_file, "w") as f:
+            json.dump({"stop": False}, f)
+    except Exception:
+        pass
+
+
+def set_stop_flag():
+    """Set the stop flag."""
+    try:
+        stop_file = get_stop_flag_path()
+        with open(stop_file, "w") as f:
+            json.dump({"stop": True}, f)
+    except Exception:
+        pass
+
+
 # ── Main Client Logic ─────────────────────────────────────────────
 
 def run_adaptive_client(
@@ -98,9 +139,13 @@ def run_adaptive_client(
 
     log_path = get_log_path()
     clear_logs(log_path)
+    clear_stop_flag()
 
     # Cycle through different API actions
     actions = ["health", "data", "compute", "echo"]
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 3
+    last_connected_protocol = None
 
     print("=" * 70)
     print("  ADAPTIVE CLIENT -- Dual-Mode Protocol Selection System")
@@ -155,6 +200,11 @@ def run_adaptive_client(
     delay_switched = False
 
     for i in range(1, num_requests + 1):
+        # Check stop flag
+        if check_stop_flag():
+            print(f"\n  [!] Stop requested at request #{i}. Terminating auto-run.")
+            break
+
         # ── Simulate network change midway ──
         if i == switch_delay_at and not delay_switched:
             delay_switched = True
@@ -179,48 +229,68 @@ def run_adaptive_client(
         payload = {"request_id": i, "message": f"Request #{i}"} if action == "echo" else None
 
         # ── Send request ──
+        current_protocol = hysteresis.get_current_protocol()
         try:
             start = time.perf_counter()
             response = session.send_request(action, payload)
             rtt = response.get("_rtt_ms", 0)
             payload_size = response.get("_payload_size", 0)
             status = response.get("status", "unknown")
+            consecutive_errors = 0
         except Exception as e:
-            print(f"  [{i:3d}] ERROR: {e}")
+            consecutive_errors += 1
+            print(f"  [{i:3d}] ERROR: {e} (consecutive: {consecutive_errors})")
+            
+            # Switch protocol after max consecutive errors
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                other_protocol = "TCP" if current_protocol == "TLS" else "TLS"
+                print(f"  [!] Max consecutive errors reached. Emergency switch to {other_protocol}")
+                try:
+                    hysteresis.force_protocol(other_protocol)
+                    session.switch_to(other_protocol)
+                    consecutive_errors = 0
+                except Exception as switch_err:
+                    print(f"  [!] Emergency switch failed: {switch_err}")
+            
             # Log the error with error status
-            current_protocol = hysteresis.get_current_protocol()
             log_entry = {
                 "request_id": i,
                 "timestamp": time.time(),
                 "protocol": current_protocol,
                 "action": action,
                 "rtt_ms": 0,
-                "handshake_time_ms": session._last_handshake_time.get(current_protocol, 0),
+                "handshake_time_ms": 0,
                 "payload_size": 0,
                 "tls_score": evaluation["tls_score"],
                 "tcp_score": evaluation["tcp_score"],
                 "status": "error",
                 "request_type": "AUTO",
+                "tls_components": evaluation.get("tls_components", {}),
+                "tcp_components": evaluation.get("tcp_components", {}),
             }
-            log_entry.update(log_entry_components(log_entry, probe_results, evaluation))
             save_log_entry(log_path, log_entry)
             
             # Try to reconnect
             try:
                 session.connect(hysteresis.get_current_protocol())
+                last_connected_protocol = None  # reset so handshake is logged after reconnect
             except Exception:
                 pass
             continue
 
+        # Determine if this is the first request after a switch
+        is_new_connection = (current_protocol != last_connected_protocol)
+        last_connected_protocol = current_protocol
+        handshake_time = session._last_handshake_time.get(current_protocol, 0) if is_new_connection else 0
+
         # ── Log the request ──
-        current_protocol = hysteresis.get_current_protocol()
         log_entry = {
             "request_id": i,
             "timestamp": time.time(),
             "protocol": current_protocol,
             "action": action,
             "rtt_ms": rtt,
-            "handshake_time_ms": session._last_handshake_time.get(current_protocol, 0),
+            "handshake_time_ms": handshake_time,
             "payload_size": payload_size,
             "tls_score": evaluation["tls_score"],
             "tcp_score": evaluation["tcp_score"],
@@ -259,6 +329,7 @@ def run_adaptive_client(
                     print(f"\n  >>> SWITCHING PROTOCOL: {decision['protocol']}")
                     try:
                         session.switch_to(decision["protocol"])
+                        last_connected_protocol = None  # reset so handshake is logged
                     except Exception as e:
                         print(f"  [!] Switch failed: {e}")
 
@@ -268,6 +339,7 @@ def run_adaptive_client(
         time.sleep(0.3)
 
     # ── Cleanup ──
+    clear_stop_flag()
     session.close_all()
 
     print(f"\n{'=' * 70}")

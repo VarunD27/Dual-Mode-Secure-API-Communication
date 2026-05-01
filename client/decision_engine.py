@@ -127,7 +127,7 @@ class DecisionEngine:
         # Normalize payload size (divide by 1000 to bring into similar scale as ms)
         payload_cost = metrics.get("payload_size", 0) / 1000.0
         success = metrics.get("success", True)
-        error_rate = 1.0 - (metrics.get("success_rate", 1.0) if success else 0.0)
+        error_rate = metrics.get("error_rate", 0.0)
         
         # If request failed, apply heavy penalty
         if not success:

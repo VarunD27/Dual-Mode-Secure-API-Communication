@@ -21,8 +21,9 @@ TABLE OF CONTENTS
       2.7  client/hysteresis_controller.py
       2.8  client/session_manager.py
       2.9  client/adaptive_client.py
-      2.10 dashboard/dashboard_server.py
-      2.11 dashboard/index.html, style.css, script.js
+      2.10 client/manual_client.py
+      2.11 dashboard/dashboard_server.py
+      2.12 dashboard/index.html, style.css, script.js
   3.  How the Custom TCP Server Works (Deep Dive)
   4.  How Protocols Are Assigned & Selection Criteria
   5.  Complete Sequential Flow of Actions
@@ -47,9 +48,13 @@ SOLUTION:
   - TWO communication modes running simultaneously:
       (a) Secure Mode: Flask HTTPS with TLS 1.3  (Port 5000)
       (b) Fast Mode:   Custom TCP with AES-GCM   (Port 6000)
-  - A Decision Engine that SCORES both protocols
+  - A 5-Factor Decision Engine that SCORES both protocols
+    (latency, handshake, payload, security, reliability)
   - A Hysteresis Controller that prevents rapid switching
-  - A Real-Time Dashboard for visualization
+  - Network Simulation via dashboard (delay + error rate injection)
+  - A Real-Time Dashboard with 5 charts for visualization
+  - Session-wise handshake optimization
+  - Emergency protocol switch on persistent failures
 
 
 ================================================================================
@@ -81,14 +86,6 @@ WHY WE NEED IT:
   encrypted connections. In production, you'd buy one from a Certificate
   Authority. For our lab project, a self-signed certificate is sufficient.
 
-IMPORTANT CLASSES/FUNCTIONS USED:
-  - rsa.generate_private_key(public_exponent=65537, key_size=2048)
-      Generates RSA key pair. 65537 is the standard public exponent.
-  - x509.CertificateBuilder()
-      Builds the certificate step by step (subject, validity, extensions).
-  - cert.sign(key, hashes.SHA256())
-      Signs the certificate with SHA-256 hash algorithm.
-
 
 --------------------------------------------------------------------------------
 2.2  server/shared_api.py
@@ -113,8 +110,6 @@ KEY FUNCTIONS:
     - Sleeps for the specified number of milliseconds
     - Used to simulate network latency artificially
     - Called BEFORE processing each request on both servers
-    - This is how we create "low latency" (20ms) and "high latency" (180ms)
-      conditions without needing real network degradation
 
 WHY SHARED:
   The whole point of the project is to compare PROTOCOL OVERHEAD, not
@@ -137,16 +132,16 @@ HOW IT WORKS:
 KEY FUNCTIONS:
 
   main()
-    - Parses command-line arguments (--port, --delay)
+    - Parses command-line arguments (--port, --delay, --packet-loss)
     - Loads TLS certificates from certs/ directory
     - Creates ssl.SSLContext with PROTOCOL_TLS_SERVER
     - Sets minimum_version to TLSv1_3 (enforces TLS 1.3 only)
     - Starts Flask with ssl_context parameter
 
-  @app.before_request -> apply_delay()
+  @app.before_request -> apply_network_conditions()
     - Flask decorator that runs BEFORE every request
-    - Calls inject_delay(ARTIFICIAL_DELAY_MS)
-    - Simulates network latency
+    - Simulates packet loss if PACKET_LOSS_RATE > 0
+    - Calls inject_delay(ARTIFICIAL_DELAY_MS) to simulate latency
 
   ROUTE HANDLERS:
     @app.route("/api/health")   -> Calls handle_request("health")
@@ -154,6 +149,7 @@ KEY FUNCTIONS:
     @app.route("/api/echo")     -> Calls handle_request("echo", payload)
     @app.route("/api/compute")  -> Calls handle_request("compute")
     @app.route("/api/set_delay")-> Dynamically changes the delay value
+    @app.route("/api/set_packet_loss") -> Dynamically changes packet loss rate
 
 IMPORTANT CLASSES USED:
   - ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -238,6 +234,13 @@ HOW THE CUSTOM TCP SERVER WORKS (STEP BY STEP):
       5. Decrypt remaining bytes: AESGCM.decrypt(nonce, ciphertext)
       6. Parse the decrypted bytes as JSON
 
+  STEP 5: Replay Attack Protection
+    - Each request must include a "nonce" (UUID) and "timestamp"
+    - Server maintains a cache of seen nonces
+    - If a nonce is reused, the request is rejected
+    - Timestamps older than 5 minutes are rejected
+    - This prevents replay attacks even without TLS
+
 KEY FUNCTIONS:
 
   generate_aes_key() -> bytes
@@ -276,28 +279,9 @@ KEY FUNCTIONS:
     - Phase 1: Perform HELLO->ACK handshake
     - Phase 2: Loop receiving encrypted requests, processing them,
       and sending encrypted responses
+    - Validates nonce/timestamp for replay protection
     - Uses inject_delay() for artificial latency
-
-IMPORTANT CLASSES USED:
-  - AESGCM (from cryptography.hazmat.primitives.ciphers.aead)
-      Authenticated Encryption with Associated Data
-      Provides BOTH encryption (confidentiality) AND authentication (integrity)
-  - socket.socket(AF_INET, SOCK_STREAM)
-      Raw TCP socket - the lowest level of network programming
-  - struct.pack / struct.unpack
-      Converts between Python integers and fixed-size binary data
-  - threading.Thread
-      Each client gets its own thread for concurrent handling
-
-AES-256-GCM EXPLAINED:
-  - AES   = Advanced Encryption Standard (block cipher)
-  - 256   = Key size in bits (32 bytes)
-  - GCM   = Galois/Counter Mode (authenticated encryption mode)
-  - Provides BOTH:
-      (a) Confidentiality: data is encrypted, can't be read
-      (b) Integrity: any tampering is detected via the auth tag
-  - Nonce (12 bytes): Must be unique per encryption with the same key
-    We use os.urandom(12) for random nonce generation
+    - Simulates packet loss if PACKET_LOSS_RATE > 0
 
 
 --------------------------------------------------------------------------------
@@ -305,24 +289,36 @@ AES-256-GCM EXPLAINED:
 --------------------------------------------------------------------------------
 
 PURPOSE: Probes BOTH servers to measure their real-time performance metrics
-         before and during the session.
+         before and during the session. Reads simulation configuration
+         from logs/simulation_config.json to include injected delays
+         and error rates in probe measurements.
 
 KEY FUNCTIONS:
+
+  _load_simulation_config()
+    - Reads logs/simulation_config.json
+    - Returns dict with tls_delay_ms, tcp_delay_ms, error_rate
+    - If file missing, returns zeros
 
   probe_tls() -> dict
     - Creates a NEW requests.Session (fresh TCP + TLS connection)
     - FIRST request: measures HANDSHAKE TIME
       (includes TCP connect + TLS handshake + first HTTP request)
+      The configured tls_delay_ms is ADDED to the measured time
     - SECOND request: measures RTT (Round-Trip Time)
       (connection already established, measures pure request latency)
-    - Also records payload_size (response body size in bytes)
-    - Returns: {handshake_time, rtt, payload_size, success}
+      The configured tls_delay_ms is ADDED to the measured time
+    - Simulates errors based on configured error_rate
+    - Returns: {handshake_time, rtt, payload_size, success, error_rate}
 
   probe_tcp() -> dict
     - Creates a NEW TCP socket connection
     - Performs HELLO->ACK handshake (measures handshake time)
+      The configured tcp_delay_ms is ADDED to the measured time
     - Sends one encrypted health request (measures RTT)
-    - Returns: {handshake_time, rtt, payload_size, success}
+      The configured tcp_delay_ms is ADDED to the measured time
+    - Simulates errors based on configured error_rate
+    - Returns: {handshake_time, rtt, payload_size, success, error_rate}
 
   probe_both() -> dict
     - Calls probe_tls() and probe_tcp() sequentially
@@ -345,25 +341,30 @@ IMPORTANT: time.perf_counter() is used for timing because it provides
 --------------------------------------------------------------------------------
 
 PURPOSE: The BRAIN of the system. Computes a cost score for each protocol
-         using a weighted multi-metric formula.
+         using a 5-factor weighted multi-metric formula.
 
 THE SCORING FORMULA:
   Score = w1 * latency + w2 * handshake_time + w3 * payload_cost
+          + w4 * security_cost + w5 * reliability_cost
 
   Where:
-    w1 = 0.5  (weight for RTT latency)       - MOST IMPORTANT
-    w2 = 0.3  (weight for handshake time)     - MODERATELY IMPORTANT
-    w3 = 0.2  (weight for payload overhead)   - LEAST IMPORTANT
+    w1 = 0.4  (weight for RTT latency)
+    w2 = 0.3  (weight for handshake time)
+    w3 = 0.1  (weight for payload overhead)
+    w4 = 0.1  (weight for security cost)
+    w5 = 0.1  (weight for reliability cost)
 
   payload_cost = payload_size / 1000  (normalized to similar scale as ms)
+  security_cost = 1.0 for TLS, 5.0 for TCP (lower = more secure)
+  reliability_cost = error_rate * 1000 + volatility_penalty
 
   LOWER SCORE = BETTER PROTOCOL
 
 KEY FUNCTIONS:
 
-  compute_score(metrics) -> float
-    - Takes a dict with rtt, handshake_time, payload_size
-    - Applies the weighted formula
+  compute_score(metrics, protocol) -> float
+    - Takes a dict with rtt, handshake_time, payload_size, success, error_rate
+    - Applies the weighted 5-factor formula
     - Returns the cost score
 
   evaluate(tls_metrics, tcp_metrics) -> dict
@@ -371,17 +372,25 @@ KEY FUNCTIONS:
     - Determines which is recommended (lower score wins)
     - Calculates score_advantage as a percentage:
         advantage = (loser_score - winner_score) / loser_score * 100
-    - Returns: {tls_score, tcp_score, recommended, score_advantage}
+    - Returns detailed components: {tls_score, tcp_score, recommended,
+      score_advantage, tls_components, tcp_components}
+
+  _get_score_components(metrics, protocol) -> dict
+    - Returns a breakdown of each factor's contribution:
+      latency_cost, handshake_cost, payload_cost, security_cost,
+      reliability_cost, and raw_metrics
 
 EXAMPLE:
-  TLS metrics: RTT=85ms, handshake=120ms, payload=512B
-  TCP metrics: RTT=30ms, handshake=15ms,  payload=480B
+  TLS metrics: RTT=85ms, handshake=120ms, payload=512B, error_rate=0.0
+  TCP metrics: RTT=30ms, handshake=15ms,  payload=480B, error_rate=0.0
 
-  TLS score = 0.5*85 + 0.3*120 + 0.2*(512/1000) = 42.5 + 36.0 + 0.102 = 78.6
-  TCP score = 0.5*30 + 0.3*15  + 0.2*(480/1000) = 15.0 + 4.5  + 0.096 = 19.6
+  TLS score = 0.4*85 + 0.3*120 + 0.1*(512/1000) + 0.1*1.0 + 0.1*0
+            = 34.0 + 36.0 + 0.051 + 0.1 + 0 = 70.151
+  TCP score = 0.4*30 + 0.3*15  + 0.1*(480/1000) + 0.1*5.0 + 0.1*0
+            = 12.0 + 4.5  + 0.048 + 0.5 + 0 = 17.048
 
-  Recommended: TCP (score 19.6 < 78.6)
-  Advantage: (78.6 - 19.6) / 78.6 * 100 = 75.1%
+  Recommended: TCP (score 17.0 < 70.2)
+  Advantage: (70.2 - 17.0) / 70.2 * 100 = 75.8%
 
 
 --------------------------------------------------------------------------------
@@ -420,7 +429,7 @@ KEY FUNCTIONS:
     - Returns "TLS" or "TCP"
 
   force_protocol(protocol)
-    - Manually override (for testing)
+    - Manually override (for testing or emergency switch)
 
 INTERNAL STATE:
   - current_protocol: The protocol currently in use
@@ -434,18 +443,21 @@ INTERNAL STATE:
 
 PURPOSE: Manages the ACTIVE CONNECTION to whichever server is currently
          selected. Handles connecting, disconnecting, switching, and
-         sending requests.
+         sending requests. Includes session-wise handshake optimization
+         and simulation config reloading.
 
 KEY FUNCTIONS:
 
   connect_tls()
     - Creates a requests.Session (HTTP session with keep-alive)
+    - Measures and stores handshake time in _last_handshake_time['TLS']
     - Makes a test request to verify the connection works
     - Sets active_protocol = "TLS"
 
   connect_tcp()
     - Creates a raw TCP socket
     - Performs HELLO->ACK handshake
+    - Measures and stores handshake time in _last_handshake_time['TCP']
     - Extracts and stores the AES key
     - Sets active_protocol = "TCP"
 
@@ -456,19 +468,29 @@ KEY FUNCTIONS:
   send_request(action, payload) -> dict
     - Dispatches to _send_tls_request() or _send_tcp_request()
       based on active_protocol
+    - Reloads simulation_config.json every 2 seconds
     - Both measure RTT using time.perf_counter()
     - Both add _rtt_ms and _payload_size to the response
+    - Both inject configured artificial delay into RTT
+    - Both simulate errors based on configured error_rate
+    - Both retry up to 3 times on failure
 
   _send_tls_request(action, payload)
     - Uses self._http_session.get() or .post() with verify=False
     - verify=False because we're using self-signed certificates
+    - Applies tls_delay_ms from simulation config
+    - Simulates error if random() < error_rate
+    - Retries up to 3 times with exponential backoff
     - Returns JSON response
 
   _send_tcp_request(action, payload)
-    - Serializes request as JSON
+    - Serializes request as JSON with nonce and timestamp
     - Encrypts with AES-GCM using stored key
     - Sends length-prefixed encrypted message
     - Receives and decrypts the response
+    - Applies tcp_delay_ms from simulation config
+    - Simulates error if random() < error_rate
+    - Retries up to 3 times with reconnection on connection loss
     - Returns parsed JSON
 
   should_reevaluate(interval_requests=5, interval_seconds=10) -> bool
@@ -477,6 +499,14 @@ KEY FUNCTIONS:
 
   close_all()
     - Closes HTTP session and/or TCP socket cleanly
+
+SESSION-WISE HANDSHAKE OPTIMIZATION:
+  - Handshake time is measured ONLY during connect_tls() / connect_tcp()
+  - Stored in self._last_handshake_time dictionary
+  - After a switch or reconnect, the next logged request shows the handshake
+  - All subsequent requests in the same session show handshake_time_ms = 0
+  - This accurately represents real-world behavior where handshake is
+    a one-time cost per session, not per request.
 
 
 --------------------------------------------------------------------------------
@@ -493,26 +523,46 @@ KEY FUNCTIONS:
     
     This is the heart of the entire project. It:
     1. Initializes all components (prober, engine, hysteresis, session)
-    2. Clears old logs
+    2. Clears old logs and stop flag
     3. Probes both servers initially
     4. Evaluates which protocol to start with
     5. Connects using the chosen protocol
     6. Runs a loop of N requests:
+       - Checks stop flag every iteration (allows clean termination)
        - At switch_delay_at, increases TLS server delay to simulate
          network degradation (via the /api/set_delay endpoint)
        - Every 5 requests, re-probes and re-evaluates
        - If hysteresis controller triggers: switches protocol
        - Logs every request to logs/session_log.json
+       - On 3 consecutive errors: emergency switches to other protocol
     7. Prints summary report
+
+  STOP FLAG MECHANISM:
+    - get_stop_flag_path() -> logs/stop_flag.json
+    - check_stop_flag() -> reads {"stop": true/false}
+    - clear_stop_flag() -> resets to false
+    - The dashboard Stop button writes {"stop": true}
+    - The client checks this flag at the start of every request loop
+    - This allows CLEAN termination without force-killing
+
+  EMERGENCY PROTOCOL SWITCH:
+    - Tracks consecutive_errors counter
+    - After MAX_CONSECUTIVE_ERRORS (3) failures:
+      * Force-switches to the other protocol via hysteresis.force_protocol()
+      * Resets error counter
+      * Attempts to reconnect
+    - This ensures the system adapts even when reliability drops to zero
+
+  SESSION-WISE HANDSHAKE LOGGING:
+    - Tracks last_connected_protocol
+    - Only logs handshake_time_ms when protocol changes or reconnects
+    - Subsequent requests in same session log handshake_time_ms = 0
 
   get_log_path(), load_logs(), save_log_entry(), clear_logs()
     - File I/O functions for managing the JSON log file
     - Each log entry contains: request_id, timestamp, protocol, action,
-      rtt_ms, handshake_time_ms, payload_size, tls_score, tcp_score, status
-
-  main()
-    - Parses command-line arguments using argparse
-    - Calls run_adaptive_client() with parsed arguments
+      rtt_ms, handshake_time_ms, payload_size, tls_score, tcp_score,
+      status, tls_components, tcp_components, request_type
 
 LOG ENTRY FORMAT (what gets saved to session_log.json):
   {
@@ -523,37 +573,83 @@ LOG ENTRY FORMAT (what gets saved to session_log.json):
     "rtt_ms": 45.2,
     "handshake_time_ms": 120.5,
     "payload_size": 100,
-    "tls_score": 78.6,
-    "tcp_score": 19.6,
-    "status": "ok"
+    "tls_score": 70.2,
+    "tcp_score": 17.0,
+    "status": "ok",
+    "request_type": "AUTO",
+    "tls_components": { ... },
+    "tcp_components": { ... }
   }
 
 
 --------------------------------------------------------------------------------
-2.10  dashboard/dashboard_server.py
+2.10  client/manual_client.py
+--------------------------------------------------------------------------------
+
+PURPOSE: Interactive CLI client for sending manual API requests.
+         Demonstrates that the system is a real API communication platform.
+         Logs are written to logs/manual_session_log.json and appear
+         in the dashboard alongside auto-run logs.
+
+KEY FEATURES:
+  - Probes both protocols before each evaluation cycle
+  - Uses the same SessionManager, DecisionEngine, and HysteresisController
+  - Logs real tls_score, tcp_score, and component breakdowns
+  - Supports actions: health, data, echo, compute
+  - Commands: probe, switch, status, help, quit
+
+HOW TO RUN:
+  cd "c:\Users\varun\Desktop\NPS Lab el"
+  python client/manual_client.py
+
+IMPORTANT:
+  - Must be run from the PROJECT ROOT, not from inside client/ folder
+  - This ensures imports work and logs go to the correct path
+  - Log file path: logs/manual_session_log.json (relative to project root)
+
+
+--------------------------------------------------------------------------------
+2.11  dashboard/dashboard_server.py
 --------------------------------------------------------------------------------
 
 PURPOSE: A simple HTTP server that serves the dashboard web page and
-         provides an API endpoint to read the log data.
+         provides API endpoints for control and data.
 
 KEY CLASS:
   DashboardHandler (extends SimpleHTTPRequestHandler)
     - For normal paths (/, /index.html, etc.): serves static files
       from the dashboard/ directory
-    - For /api/logs: reads logs/session_log.json and returns it as JSON
+    - For /api/logs: reads logs/session_log.json and manual_session_log.json,
+      combines and sorts them, returns as JSON
+    - For /api/run-auto: starts adaptive_client.py as subprocess
+    - For /api/stop-auto: writes stop flag + kills subprocess
+    - For /api/set-delay: updates simulation_config.json
+    - For /api/set-error-rate: updates simulation_config.json
+    - For /api/reset-delays: zeros all simulation params + resets TLS server
+    - For /api/probe-network: performs live probing and returns real metrics
+    - For /api/clear-logs: truncates all log files
     - Adds CORS header (Access-Control-Allow-Origin: *) so the
       browser can fetch data without cross-origin errors
 
+NETWORK SIMULATION CONFIGURATION:
+  - Global variables: tls_delay_ms, tcp_delay_ms, error_rate_simulation
+  - _write_simulation_config() writes to logs/simulation_config.json
+  - The prober and session manager read this file every 2 seconds
+  - This enables real-time network condition changes without restarting
+
 
 --------------------------------------------------------------------------------
-2.11  dashboard/index.html, style.css, script.js
+2.12  dashboard/index.html, style.css, script.js
 --------------------------------------------------------------------------------
 
 index.html:
   - Semantic HTML5 structure
-  - Stats Cards: Total Requests, Active Protocol, Avg RTT, Protocol Switches
-  - 4 Chart containers using <canvas> elements for Chart.js
-  - Log Table: Live feed of all requests
+  - Network Simulation Control Panel
+  - Stats Cards: Total Requests, Active Protocol, Avg RTT, Protocol Switches,
+    Security Score, Reliability Score
+  - 5 Chart containers using <canvas> elements for Chart.js
+  - Network Configuration Display Panel (hidden by default, shown on probe)
+  - Log Table: Live feed of all requests (auto + manual)
 
 style.css:
   - Dark mode design with CSS custom properties (variables)
@@ -566,23 +662,41 @@ script.js:
   KEY FUNCTIONS:
 
   initCharts()
-    - Creates 4 Chart.js instances:
+    - Creates 5 Chart.js instances:
       1. Protocol Timeline (bar chart): Shows TLS=1, TCP=0 per request
       2. RTT Comparison (line chart): Two lines for TLS and TCP latency
-      3. Handshake Overhead (bar chart): Grouped bars showing handshake cost
+      3. Request Outcome (bar chart): Success=1, Failed=0 per request
       4. Score Divergence (line chart): TLS score vs TCP score over time
+      5. Decision Component Breakdown (stacked bar chart):
+         Shows latency, handshake, payload, security, reliability components
 
   updateDashboard(logs)
     - Processes the log array and updates:
       * Stats cards (total requests, current protocol, avg RTT, switch count)
-      * All 4 charts with new data
+      * All 5 charts with new data
+      * Security Score and Reliability Score from log components
       * The log table (most recent 50 entries)
 
   fetchLogs()
-    - Fetches /api/logs every 2 seconds (POLL_INTERVAL)
+    - Fetches /api/logs every 3 seconds (POLL_INTERVAL)
     - Only updates if data length changed (efficiency)
 
-  Auto-poll: setInterval(fetchLogs, 2000) starts on page load
+  setupControls()
+    - Attaches event listeners to all dashboard buttons
+    - Run Auto: POST /api/run-auto
+    - Stop: POST /api/stop-auto
+    - Apply Delay: POST /api/set-delay
+    - Apply Error Rate: POST /api/set-error-rate
+    - Probe: POST /api/probe-network -> displayNetworkConfig()
+    - Reset: POST /api/reset-delays
+    - Clear: POST /api/clear-logs -> reset all charts and stats
+
+  displayNetworkConfig(data)
+    - Shows the #network-config panel
+    - Fills in TLS/TCP RTT, handshake, and scores
+    - Auto-hides after 10 seconds
+
+  Auto-poll: setInterval(fetchLogs, 3000) starts on page load
 
 
 ================================================================================
@@ -626,7 +740,7 @@ WHY IS IT LESS SECURE?
   1. AES key sent in plaintext (vulnerable to eavesdropping)
   2. No server authentication (client can't verify server identity)
   3. No forward secrecy (if key is compromised, all past messages exposed)
-  4. No protection against replay attacks
+  4. No protection against replay attacks (MITIGATED by our nonce/timestamp)
 
 THIS TRADE-OFF IS THE ENTIRE POINT OF THE PROJECT!
 
@@ -640,14 +754,14 @@ PROTOCOL ASSIGNMENT HAPPENS IN 3 STAGES:
 STAGE 1: INITIAL SELECTION (at startup)
   - The system starts with TLS by default (secure-first approach)
   - However, it immediately probes both servers
-  - The decision engine computes scores
+  - The decision engine computes 5-factor scores
   - If TCP is significantly better, hysteresis allows switching after
     3 consecutive checks (but for the first run, it starts with TLS)
 
 STAGE 2: PERIODIC RE-EVALUATION (every 5 requests or 10 seconds)
   - The adaptive client calls prober.probe_both()
-  - Both servers are tested for current RTT and handshake time
-  - Decision engine computes new scores for both
+  - Both servers are tested for current RTT, handshake time, and error rate
+  - Decision engine computes new scores for both (including reliability)
   - Hysteresis controller evaluates:
       Q: Should we switch?
       IF recommended != current AND advantage > 15% AND 3 consecutive -> YES
@@ -655,27 +769,29 @@ STAGE 2: PERIODIC RE-EVALUATION (every 5 requests or 10 seconds)
 
 STAGE 3: NETWORK CHANGE SIMULATION (at request #switch_delay_at)
   - The client sends a POST to TLS server's /api/set_delay endpoint
-  - TLS server delay jumps from 20ms to 180ms
-  - TCP server delay stays at 20ms
+  - TLS server delay jumps from low_delay to high_delay
+  - TCP server delay stays unchanged
   - Next re-evaluation detects TLS is now much slower
   - After 3 consecutive checks confirming TCP's advantage -> SWITCHES
 
-SELECTION CRITERIA (the scoring formula):
+SELECTION CRITERIA (the 5-factor scoring formula):
 
-  Score = 0.5 * latency_ms + 0.3 * handshake_ms + 0.2 * (payload_bytes/1000)
+  Score = 0.4 * latency_ms + 0.3 * handshake_ms + 0.1 * (payload_bytes/1000)
+          + 0.1 * security_cost + 0.1 * reliability_cost
 
   This means:
-    - 50% of the score comes from RTT (how fast each request is)
+    - 40% of the score comes from RTT (how fast each request is)
     - 30% from handshake cost (one-time setup overhead)
-    - 20% from payload size (data transfer efficiency)
+    - 10% from payload size (data transfer efficiency)
+    - 10% from security cost (TLS is cheaper = more secure)
+    - 10% from reliability cost (error_rate * 1000)
 
   WHY THESE WEIGHTS?
-    - Latency (0.5): Most noticeable to users. Even small RTT differences
-      compound over many requests.
-    - Handshake (0.3): Important for new connections, but paid only once
-      per session. Less impactful if connection persists.
-    - Payload (0.2): Least impactful because both protocols send similar
-      data; the difference is mainly protocol framing overhead.
+    - Latency (0.4): Most noticeable to users.
+    - Handshake (0.3): Important for new connections, but paid only once.
+    - Payload (0.1): Least impactful because both protocols send similar data.
+    - Security (0.1): Gives TLS a consistent advantage in security-critical scenarios.
+    - Reliability (0.1): When error rate increases, this penalizes the affected protocol.
 
 
 ================================================================================
@@ -686,7 +802,7 @@ Here is the EXACT order in which code executes, from start to finish:
 
 PHASE 0: SETUP (done once, before running)
   1. pip install -r requirements.txt
-     -> Installs flask, cryptography, requests
+     -> Installs flask, cryptography, requests, urllib3
   2. python generate_certs.py
      -> generate_certificates() creates certs/server.crt and certs/server.key
 
@@ -703,44 +819,46 @@ PHASE 1: START SERVERS (in separate terminals)
      -> main() creates HTTPServer on :8080
      -> Serving index.html, style.css, script.js, /api/logs
 
-PHASE 2: START ADAPTIVE CLIENT
-  6. python client/adaptive_client.py
+PHASE 2: START ADAPTIVE CLIENT (via Dashboard or Terminal)
+  6. Click "Run 30 Auto" on dashboard OR run python client/adaptive_client.py
      -> main() parses arguments
      -> run_adaptive_client() begins:
 
   7. INITIALIZATION:
      -> Creates NetworkProber instance
-     -> Creates DecisionEngine(w1=0.5, w2=0.3, w3=0.2)
+     -> Creates DecisionEngine(w1=0.4, w2=0.3, w3=0.1, w4=0.1, w5=0.1)
      -> Creates HysteresisController(threshold=15%, consecutive=3)
      -> Creates SessionManager
      -> Clears old log file
+     -> Clears stop flag (logs/stop_flag.json)
 
   8. INITIAL PROBE:
      -> prober.probe_tls():
-        a) Creates requests.Session
-        b) GET https://localhost:5000/api/health (measures handshake)
-           - On server side: tls_server.py handles the request
-           - apply_delay() injects 20ms delay
-           - handle_request("health") returns status
-        c) GET same URL again (measures RTT on established connection)
-        d) Returns {handshake_time: X, rtt: Y, payload_size: Z}
+        a) Reads simulation_config.json for delay and error rate
+        b) Creates requests.Session
+        c) GET https://localhost:5000/api/health (measures handshake)
+           - delay is ADDED to measured time
+           - error may be simulated based on error_rate
+        d) GET same URL again (measures RTT)
+        e) Returns {handshake_time, rtt, payload_size, success, error_rate}
      
      -> prober.probe_tcp():
-        a) Creates raw TCP socket, connects to localhost:6000
-           - On server side: tcp_server.py accepts, spawns thread
-        b) Sends "HELLO"
-        c) Server generates AES key, sends "ACK:<key>"
-           (measures handshake time)
-        d) Encrypts {"action":"health"} with AES-GCM, sends it
-        e) Receives encrypted response, decrypts it
-           (measures RTT)
-        f) Returns {handshake_time: X, rtt: Y, payload_size: Z}
+        a) Reads simulation_config.json for delay and error rate
+        b) Creates raw TCP socket, connects to localhost:6000
+        c) Sends "HELLO"
+        d) Server generates AES key, sends "ACK:<key>"
+           (measures handshake time, delay added)
+        e) Encrypts {"action":"health"} with AES-GCM, sends it
+        f) Receives encrypted response, decrypts it
+           (measures RTT, delay added)
+        g) Returns {handshake_time, rtt, payload_size, success, error_rate}
 
   9. INITIAL EVALUATION:
      -> engine.evaluate(tls_metrics, tcp_metrics):
-        a) compute_score(tls_metrics) -> tls_score
-        b) compute_score(tcp_metrics) -> tcp_score
-        c) Returns {tls_score, tcp_score, recommended, score_advantage}
+        a) compute_score(tls_metrics, "TLS") -> tls_score
+        b) compute_score(tcp_metrics, "TCP") -> tcp_score
+        c) Returns {tls_score, tcp_score, recommended, score_advantage,
+           tls_components, tcp_components}
      
      -> hysteresis.should_switch(evaluation):
         a) First call: recommended probably differs from "TLS" (default)
@@ -749,31 +867,48 @@ PHASE 2: START ADAPTIVE CLIENT
 
   10. CONNECT:
       -> session.connect("TLS")  [or "TCP" if already switched]
-      -> If TLS: Creates HTTP session, test request
-      -> If TCP: Socket connect, HELLO->ACK handshake
+      -> If TLS: Creates HTTP session, test request, stores handshake time
+      -> If TCP: Socket connect, HELLO->ACK handshake, stores handshake time
 
   11. REQUEST LOOP (for i = 1 to num_requests):
       
-      a) CHECK NETWORK CHANGE:
+      a) CHECK STOP FLAG:
+         -> check_stop_flag() reads logs/stop_flag.json
+         -> If {"stop": true}, prints message and breaks loop cleanly
+      
+      b) CHECK NETWORK CHANGE:
          If i == switch_delay_at:
-           -> POST https://localhost:5000/api/set_delay {"delay_ms": 180}
-           -> TLS server's ARTIFICIAL_DELAY_MS changes to 180ms
-           -> TCP server delay stays at 20ms
-
-      b) SEND REQUEST:
+           -> POST https://localhost:5000/api/set_delay {"delay_ms": high_delay}
+           -> TLS server's ARTIFICIAL_DELAY_MS changes to high_delay
+           -> TCP server delay stays unchanged
+      
+      c) SEND REQUEST:
          -> session.send_request(action, payload)
+         -> SessionManager reloads simulation_config.json
          -> If TLS: HTTP GET/POST to Flask server
             - Flask receives, injects delay, calls handle_request()
          -> If TCP: Encrypts JSON, sends over socket
             - TCP server receives, decrypts, injects delay, calls
               handle_request(), encrypts response, sends back
-         -> Records RTT and payload_size
-
-      c) LOG THE REQUEST:
+         -> Records RTT (including injected delay) and payload_size
+         -> If error: retries up to 3 times
+      
+      d) LOG THE REQUEST:
+         -> handshake_time_ms = session._last_handshake_time ONLY if
+            this is the first request after a connect/switch
+         -> Otherwise handshake_time_ms = 0 (session-wise optimization)
          -> save_log_entry() appends to logs/session_log.json
-         -> Dashboard's script.js fetches this every 2 seconds
-
-      d) RE-EVALUATE (every 5 requests):
+         -> Dashboard's script.js fetches this every 3 seconds
+      
+      e) HANDLE ERRORS:
+         -> If request fails, increment consecutive_errors
+         -> If consecutive_errors >= 3:
+            * Print emergency switch message
+            * hysteresis.force_protocol(other_protocol)
+            * session.switch_to(other_protocol)
+            * Reset consecutive_errors to 0
+      
+      f) RE-EVALUATE (every 5 requests):
          -> prober.probe_both() [same as step 8]
          -> engine.evaluate()   [same as step 9]
          -> hysteresis.should_switch():
@@ -781,21 +916,24 @@ PHASE 2: START ADAPTIVE CLIENT
             * session.switch_to(new_protocol):
               - Closes old connection
               - Opens new connection
+              - Resets last_connected_protocol so handshake is logged
             * Resets hysteresis counters
-
-      e) SLEEP 0.3 seconds between requests
+      
+      g) SLEEP 0.3 seconds between requests
 
   12. CLEANUP:
+      -> clear_stop_flag() resets logs/stop_flag.json
       -> session.close_all() closes HTTP session and/or TCP socket
       -> Prints summary: total requests, number of switches, log path
 
 PHASE 3: DASHBOARD (running throughout)
-  13. Dashboard auto-refreshes every 2 seconds:
+  13. Dashboard auto-refreshes every 3 seconds:
       -> script.js calls fetch('/api/logs')
-      -> dashboard_server.py reads logs/session_log.json
+      -> dashboard_server.py reads logs/session_log.json + manual_session_log.json
       -> Returns JSON array
       -> script.js calls updateDashboard(logs)
       -> Charts and table update with new data
+      -> Stats cards update (including Security Score and Reliability Score)
 
 
 ================================================================================
@@ -804,19 +942,22 @@ PHASE 3: DASHBOARD (running throughout)
 
 1. RTT (Round-Trip Time) [measured in milliseconds]
    WHAT: The time from sending a request to receiving the complete response.
-   MEASURES: Network latency + server processing time + encryption/decryption
+   MEASURES: Network latency + server processing + encryption/decryption +
+             injected artificial delay (from simulation config)
    WHY IT MATTERS: Directly affects user-perceived responsiveness.
    HOW MEASURED: time.perf_counter() before request, after response, difference.
-   IN OUR PROJECT: TLS RTT includes HTTP + TLS record layer overhead.
-                   TCP RTT includes AES-GCM encryption + length-prefix framing.
+   IN OUR PROJECT: TLS RTT includes HTTP + TLS record layer overhead + delay.
+                   TCP RTT includes AES-GCM encryption + length-prefix + delay.
 
 2. HANDSHAKE TIME [measured in milliseconds]
    WHAT: The time to establish a NEW connection from scratch.
-   MEASURES: TCP connect + protocol-specific handshake overhead.
+   MEASURES: TCP connect + protocol-specific handshake overhead + delay.
    WHY IT MATTERS: Paid every time a new connection is created or after a switch.
    FOR TLS: Includes TCP 3-way handshake + TLS 1.3 handshake
             (ClientHello, ServerHello, certificate verify, key derivation).
    FOR TCP: Includes TCP 3-way handshake + HELLO->ACK exchange + AES key transfer.
+   SESSION-WISE: Only logged for the FIRST request after a connect/switch.
+                  Subsequent requests in the same session log 0ms.
 
 3. PAYLOAD SIZE [measured in bytes]
    WHAT: The size of the response body.
@@ -827,8 +968,9 @@ PHASE 3: DASHBOARD (running throughout)
                Our TCP protocol has minimal framing (4-byte length + 28-byte crypto).
 
 4. COST SCORE [dimensionless, computed]
-   WHAT: Weighted combination of all three metrics above.
-   FORMULA: Score = 0.5*RTT + 0.3*handshake + 0.2*(payload/1000)
+   WHAT: Weighted combination of all five metrics.
+   FORMULA: Score = 0.4*RTT + 0.3*handshake + 0.1*(payload/1000)
+                    + 0.1*security_cost + 0.1*reliability_cost
    WHY IT MATTERS: Single number that captures overall protocol efficiency.
    LOWER = BETTER.
 
@@ -841,6 +983,26 @@ PHASE 3: DASHBOARD (running throughout)
    WHAT: Number of consecutive re-evaluations where the candidate protocol won.
    WHY IT MATTERS: Must reach 3 before switching is allowed.
    PREVENTS: Oscillation due to temporary network fluctuations.
+
+7. SECURITY COST [dimensionless]
+   WHAT: Penalty for using a less secure protocol.
+   TLS: 1.0 (low cost = very secure)
+   TCP: 5.0 (higher cost = less secure)
+   WHY IT MATTERS: Ensures TLS has an inherent advantage in security-critical
+                    scenarios, balancing pure performance metrics.
+
+8. RELIABILITY COST [dimensionless]
+   WHAT: Penalty based on error rate and historical volatility.
+   FORMULA: error_rate * 1000 + volatility_penalty
+   WHY IT MATTERS: When error rate increases (via dashboard), this cost rises,
+                    making the affected protocol less attractive.
+   DASHBOARD DISPLAY: Reliability Score = 1 - error_rate (shown on stats card)
+
+9. ERROR RATE [0.0 to 1.0]
+   WHAT: Configured probability of request failure.
+   SET VIA: Dashboard "Error Rate (%)" control
+   EFFECT: Prober may return failed probes. SessionManager may raise exceptions.
+   DASHBOARD: Request Outcome chart shows failures in red.
 
 
 ================================================================================
@@ -860,6 +1022,7 @@ We compare the two protocols across these dimensions:
 |                    | (1-RTT, ~5 messages)     |                             |
 | Authentication     | X.509 certificate        | None (key sent in clear)    |
 | Forward Secrecy    | Yes (ECDHE key exchange) | No (static key per session) |
+| Replay Protection  | Built-in (TLS nonces)    | Custom (UUID + timestamp)   |
 | Framing            | HTTP headers + body      | 4-byte length prefix        |
 | Overhead per req   | ~200-400 bytes headers   | 28 bytes (nonce + tag)      |
 | Handshake latency  | HIGH (cert + key derivn) | LOW (just key exchange)     |
@@ -908,13 +1071,12 @@ RESEARCH GAP 2: "Focus on Handshake Optimization Rather Than Adaptive
   
   HOW WE ADDRESS IT:
   Our decision_engine.py doesn't just MEASURE handshake cost -- it uses
-  it as a FACTOR in a multi-metric scoring formula that actively DRIVES
-  protocol selection. The handshake metric contributes 30% of the score,
-  meaning it directly influences which protocol gets chosen.
+  it as a FACTOR in a 5-metric scoring formula that actively DRIVES
+  protocol selection. The handshake metric contributes 30% of the score.
   
   IMPLEMENTATION:
   - network_prober.py measures handshake time for both protocols
-  - decision_engine.py uses it in: Score = w1*RTT + w2*handshake + w3*payload
+  - decision_engine.py uses it in the scoring formula
   - The score determines the recommended protocol
 
 
@@ -922,17 +1084,19 @@ RESEARCH GAP 3: "Absence of Multi-Metric Decision Models for Protocol Selection"
   (Most research uses isolated parameters like latency OR security)
   
   HOW WE ADDRESS IT:
-  Our decision engine uses THREE distinct metrics combined with configurable
+  Our decision engine uses FIVE distinct metrics combined with configurable
   weights into a SINGLE cost score:
-  - RTT (latency) -> w1 = 0.5
+  - RTT (latency) -> w1 = 0.4
   - Handshake time (setup cost) -> w2 = 0.3
-  - Payload size (transfer efficiency) -> w3 = 0.2
+  - Payload size (transfer efficiency) -> w3 = 0.1
+  - Security cost -> w4 = 0.1
+  - Reliability cost -> w5 = 0.1
   
   This is a TRUE multi-metric model. No single metric dominates; the
   weights can be tuned for different deployment scenarios:
-  - Security-critical: increase handshake weight (prefer TLS)
+  - Security-critical: increase security weight (prefer TLS)
   - Latency-sensitive: increase RTT weight (prefer faster protocol)
-  - Bandwidth-constrained: increase payload weight (prefer smaller frames)
+  - Unreliable network: increase reliability weight (prefer stable protocol)
 
 
 RESEARCH GAP 4: "Limited Work on Stability-Aware Adaptive Switching"
@@ -966,14 +1130,31 @@ ADDITIONAL NOVELTY:
      allowing the system to be tuned for different priorities without
      code changes.
 
-  3. DELAY INJECTION:
-     The /api/set_delay endpoint allows DYNAMIC network condition changes
-     during a running experiment, demonstrating live adaptation.
+  3. DELAY & ERROR INJECTION:
+     The dashboard allows DYNAMIC network condition changes
+     (delay and error rate) during a running experiment, demonstrating
+     live adaptation under controlled degradation.
 
   4. CLEAN SEPARATION OF CONCERNS:
      Each component (prober, engine, hysteresis, session) is independent
      and testable. This is a proper engineering architecture, not a
      monolithic script.
+
+  5. SESSION-WISE HANDSHAKE OPTIMIZATION:
+     Handshake cost is logged only once per session, not per request.
+     This accurately represents real-world behavior and prevents
+     misleading visualization of handshake overhead.
+
+  6. EMERGENCY PROTOCOL SWITCH:
+     If a protocol fails 3 consecutive times (e.g., due to high error rate),
+     the system automatically switches to the other protocol.
+     This ensures the system remains functional even under extreme
+     network degradation.
+
+  7. MANUAL API CLIENT:
+     The manual_client.py demonstrates that this is a REAL API system,
+     not just a simulation. Users can send individual requests via CLI
+     and observe real-time adaptive behavior.
 
 
 ================================================================================

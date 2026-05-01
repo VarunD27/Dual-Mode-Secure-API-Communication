@@ -66,12 +66,12 @@
                 </div>
                 <div class="control-group">
                     <label for="tls-delay">TLS Delay:</label>
-                    <input type="number" id="tls-delay" value="20" min="0" max="500" step="10">
+                    <input type="number" id="tls-delay" value="0" min="0" max="500" step="10">
                     <button id="apply-tls-delay" class="btn btn-primary">Apply</button>
                 </div>
                 <div class="control-group">
                     <label for="tcp-delay">TCP Delay:</label>
-                    <input type="number" id="tcp-delay" value="20" min="0" max="500" step="10">
+                    <input type="number" id="tcp-delay" value="0" min="0" max="500" step="10">
                     <button id="apply-tcp-delay" class="btn btn-secondary">Apply</button>
                 </div>
                 <div class="control-group">
@@ -226,14 +226,14 @@
             </div>
         </div>
 
-        <!-- Handshake Overhead -->
-        <div class="chart-card" id="chart-handshake-card">
+        <!-- Request Outcome -->
+        <div class="chart-card" id="chart-outcome-card">
             <div class="chart-header">
-                <h2>Handshake Overhead</h2>
-                <span class="chart-badge badge-cyan">Setup Cost</span>
+                <h2>Request Outcome</h2>
+                <span class="chart-badge badge-cyan">Success / Failure</span>
             </div>
             <div class="chart-body">
-                <canvas id="chart-handshake"></canvas>
+                <canvas id="chart-outcome"></canvas>
             </div>
         </div>
 

@@ -4,16 +4,23 @@ Manual API Client - Interactive Request Testing
 Allows manual sending of requests to demonstrate API communication
 """
 
+import os
 import sys
 import time
 import json
 import uuid
 import logging
 from typing import Dict, Any, Optional
-from session_manager import SessionManager
-from decision_engine import DecisionEngine
-from hysteresis_controller import HysteresisController
-from network_prober import NetworkProber
+
+# Ensure imports work when run from project root or client directory
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from client.session_manager import SessionManager
+from client.decision_engine import DecisionEngine
+from client.hysteresis_controller import HysteresisController
+from client.network_prober import NetworkProber
 
 # Configure logging
 logging.basicConfig(
@@ -33,7 +40,8 @@ class ManualClient:
         self.hysteresis = HysteresisController()
         self.prober = NetworkProber()
         self.request_count = 0
-        self.log_file = "logs/manual_session_log.json"
+        self.log_file = os.path.join(PROJECT_ROOT, "logs", "manual_session_log.json")
+        self._last_evaluation = None
         
         # Initialize log file
         self._init_log()
@@ -48,14 +56,21 @@ class ManualClient:
     
     def _log_request(self, protocol: str, action: str, response: Dict[str, Any]):
         """Log request details to file."""
-        # Get current handshake time from session
+        # Get current handshake time from session (only on first request after connect/switch)
         handshake_time = 0
         if hasattr(self.session, '_last_handshake_time'):
             handshake_time = self.session._last_handshake_time.get(protocol, 0)
-        elif protocol == "TLS" and hasattr(self.session, '_http_session'):
-            handshake_time = 2300.0  # Approximate TLS handshake time
-        elif protocol == "TCP" and hasattr(self.session, '_tcp_socket'):
-            handshake_time = 6.0  # Approximate TCP handshake time
+        
+        # Use evaluated scores if available
+        tls_score = 0
+        tcp_score = 0
+        tls_components = {}
+        tcp_components = {}
+        if self._last_evaluation:
+            tls_score = self._last_evaluation.get("tls_score", 0)
+            tcp_score = self._last_evaluation.get("tcp_score", 0)
+            tls_components = self._last_evaluation.get("tls_components", {})
+            tcp_components = self._last_evaluation.get("tcp_components", {})
         
         log_entry = {
             "request_id": self.request_count,
@@ -66,21 +81,20 @@ class ManualClient:
             "handshake_time_ms": handshake_time,
             "payload_size": response.get("_payload_size", 0),
             "status": response.get("status", "unknown"),
-            "tls_score": 0,
-            "tcp_score": 0,
+            "tls_score": tls_score,
+            "tcp_score": tcp_score,
             "request_type": "MANUAL",
-            "decision": {
-                "recommended": protocol,
-                "advantage": 0,
-                "reason": "Manual request"
-            }
+            "tls_components": tls_components,
+            "tcp_components": tcp_components,
         }
         
         try:
-            with open(self.log_file, 'r+') as f:
-                logs = json.load(f)
-                logs.append(log_entry)
-                f.seek(0)
+            logs = []
+            if os.path.exists(self.log_file):
+                with open(self.log_file, 'r') as f:
+                    logs = json.load(f)
+            logs.append(log_entry)
+            with open(self.log_file, 'w') as f:
                 json.dump(logs, f, indent=2)
         except Exception as e:
             logging.error(f"Failed to log request: {e}")
@@ -97,6 +111,7 @@ class ManualClient:
         
         # Evaluate with decision engine
         evaluation = self.engine.evaluate(tls_metrics, tcp_metrics)
+        self._last_evaluation = evaluation
         print(f"   Scores: TLS={evaluation['tls_score']:.1f}, TCP={evaluation['tcp_score']:.1f}")
         print(f"   Advantage: {evaluation['score_advantage']:.1f}%")
         

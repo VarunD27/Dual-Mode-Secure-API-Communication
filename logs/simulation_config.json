@@ -1,5 +1,5 @@
 {
-  "tls_delay_ms": 50,
-  "tcp_delay_ms": 30,
-  "error_rate": 0.1
+  "tls_delay_ms": 0,
+  "tcp_delay_ms": 0,
+  "error_rate": 0.0
 }

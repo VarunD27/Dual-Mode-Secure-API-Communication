@@ -10,7 +10,7 @@ const API_URL = '/api/logs';
 // ── Chart Instances ──
 let timelineChart = null;
 let rttChart = null;
-let handshakeChart = null;
+let outcomeChart = null;
 let scoresChart = null;
 let decisionBreakdownChart = null;
 
@@ -206,42 +206,50 @@ function initCharts() {
         },
     });
 
-    // 3. Handshake Overhead (bar chart)
-    const hsCtx = document.getElementById('chart-handshake').getContext('2d');
-    handshakeChart = new Chart(hsCtx, {
+    // 3. Request Outcome (bar chart)
+    const outCtx = document.getElementById('chart-outcome').getContext('2d');
+    outcomeChart = new Chart(outCtx, {
         type: 'bar',
         data: {
             labels: [],
             datasets: [
                 {
-                    label: 'TLS Handshake',
+                    label: 'Outcome',
                     data: [],
-                    backgroundColor: COLORS.tls.fill,
-                    borderColor: COLORS.tls.border,
+                    backgroundColor: [],
+                    borderColor: [],
                     borderWidth: 1,
                     borderRadius: 4,
-                },
-                {
-                    label: 'TCP Handshake',
-                    data: [],
-                    backgroundColor: COLORS.tcp.fill,
-                    borderColor: COLORS.tcp.border,
-                    borderWidth: 1,
-                    borderRadius: 4,
+                    barPercentage: 0.6,
+                    categoryPercentage: 0.7,
                 },
             ],
         },
         options: {
             ...commonOptions,
+            plugins: {
+                ...commonOptions.plugins,
+                legend: { display: false },
+                tooltip: {
+                    ...commonOptions.plugins.tooltip,
+                    callbacks: {
+                        label: (ctx) => {
+                            const val = ctx.raw;
+                            return val === 1 ? 'Success' : 'Failed';
+                        },
+                    },
+                },
+            },
             scales: {
                 ...commonOptions.scales,
                 y: {
                     ...commonOptions.scales.y,
-                    title: {
-                        display: true,
-                        text: 'Time (ms)',
-                        color: COLORS.gridText,
-                        font: { size: 11 },
+                    min: -0.2,
+                    max: 1.2,
+                    ticks: {
+                        ...commonOptions.scales.y.ticks,
+                        callback: (val) => val === 1 ? 'Success' : val === 0 ? 'Failed' : '',
+                        stepSize: 1,
                     },
                 },
                 x: {
@@ -305,36 +313,57 @@ function initCharts() {
         },
     });
 
-    // 5. Decision Score Comparison (simple line chart)
+    // 5. Decision Component Breakdown (stacked bar chart)
     const decCtx = document.getElementById('chart-decision-breakdown').getContext('2d');
     decisionBreakdownChart = new Chart(decCtx, {
-        type: 'line',
+        type: 'bar',
         data: {
             labels: [],
             datasets: [
                 {
-                    label: 'TLS Score',
+                    label: 'Latency',
                     data: [],
-                    borderColor: COLORS.tls.main,
-                    backgroundColor: COLORS.tls.fill,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    pointStyle: 'rect',
-                    borderWidth: 2,
+                    backgroundColor: 'rgba(99, 102, 241, 0.7)',
+                    borderColor: 'rgba(99, 102, 241, 1)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    stack: 'Stack 0',
                 },
                 {
-                    label: 'TCP Score',
+                    label: 'Handshake',
                     data: [],
-                    borderColor: COLORS.tcp.main,
-                    backgroundColor: COLORS.tcp.fill,
-                    fill: true,
-                    tension: 0.4,
-                    pointRadius: 4,
-                    pointHoverRadius: 6,
-                    pointStyle: 'rect',
-                    borderWidth: 2,
+                    backgroundColor: 'rgba(168, 85, 247, 0.7)',
+                    borderColor: 'rgba(168, 85, 247, 1)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    stack: 'Stack 0',
+                },
+                {
+                    label: 'Payload',
+                    data: [],
+                    backgroundColor: 'rgba(6, 182, 212, 0.7)',
+                    borderColor: 'rgba(6, 182, 212, 1)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    stack: 'Stack 0',
+                },
+                {
+                    label: 'Security',
+                    data: [],
+                    backgroundColor: 'rgba(16, 185, 129, 0.7)',
+                    borderColor: 'rgba(16, 185, 129, 1)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    stack: 'Stack 0',
+                },
+                {
+                    label: 'Reliability',
+                    data: [],
+                    backgroundColor: 'rgba(245, 158, 11, 0.7)',
+                    borderColor: 'rgba(245, 158, 11, 1)',
+                    borderWidth: 1,
+                    borderRadius: 2,
+                    stack: 'Stack 0',
                 },
             ],
         },
@@ -355,14 +384,27 @@ function initCharts() {
                         padding: 8,
                     },
                 },
+                tooltip: {
+                    ...commonOptions.plugins.tooltip,
+                    callbacks: {
+                        footer: (tooltipItems) => {
+                            let total = 0;
+                            tooltipItems.forEach((item) => {
+                                total += item.parsed.y || 0;
+                            });
+                            return `Total Score: ${total.toFixed(2)}`;
+                        },
+                    },
+                },
             },
             scales: {
                 x: { ...commonOptions.scales.x },
                 y: { 
                     ...commonOptions.scales.y, 
+                    stacked: true,
                     title: {
                         display: true,
-                        text: 'Decision Score',
+                        text: 'Component Cost',
                         color: COLORS.gridText,
                         font: { size: 11 },
                     },
@@ -381,14 +423,15 @@ function updateDashboard(logs) {
     const labels = logs.map(l => `#${l.request_id}`);
     const tlsRtts = [];
     const tcpRtts = [];
-    const tlsHandshakes = [];
-    const tcpHandshakes = [];
     const tlsScores = [];
     const tcpScores = [];
     const protocolValues = [];
     const protocolColors = [];
     const protocolBorders = [];
     const decisionComponents = [];
+    const outcomes = [];
+    const outcomeColors = [];
+    const outcomeBorders = [];
 
     let switchCount = 0;
     let prevProto = null;
@@ -396,6 +439,7 @@ function updateDashboard(logs) {
 
     logs.forEach((log) => {
         const isTLS = log.protocol === 'TLS';
+        const isSuccess = log.status === 'ok';
 
         // Protocol timeline
         protocolValues.push(isTLS ? 1 : 0);
@@ -411,9 +455,15 @@ function updateDashboard(logs) {
             tlsRtts.push(null);
         }
 
-        // Handshake
-        tlsHandshakes.push(isTLS ? log.handshake_time_ms : null);
-        tcpHandshakes.push(!isTLS ? log.handshake_time_ms : null);
+        // Outcome
+        outcomes.push(isSuccess ? 1 : 0);
+        if (!isSuccess) {
+            outcomeColors.push('rgba(239, 68, 68, 0.6)');
+            outcomeBorders.push('rgba(239, 68, 68, 0.9)');
+        } else {
+            outcomeColors.push(isTLS ? 'rgba(99, 102, 241, 0.4)' : 'rgba(6, 182, 212, 0.4)');
+            outcomeBorders.push(isTLS ? 'rgba(99, 102, 241, 0.8)' : 'rgba(6, 182, 212, 0.8)');
+        }
 
         // Scores
         tlsScores.push(log.tls_score);
@@ -425,12 +475,14 @@ function updateDashboard(logs) {
 
         totalRtt += log.rtt_ms;
         
-        // Decision components for breakdown chart
-        const latencyCost = log.rtt_ms * 0.6;
-        const handshakeCost = log.handshake_time_ms * 0.2;
-        const payloadCost = (log.payload_size / 1000) * 0.1;
-        const securityCost = log.protocol === 'TLS' ? 0.005 : 0.015;
-        const reliabilityCost = 0.05; // Small default
+        // Decision components for breakdown chart — use logged components if available
+        let comp = log.tls_components || log.tcp_components || {};
+        let raw = comp.raw_metrics || {};
+        let latencyCost = comp.latency_cost || (log.rtt_ms * 0.4);
+        let handshakeCost = comp.handshake_cost || (log.handshake_time_ms * 0.3);
+        let payloadCost = comp.payload_cost || (log.payload_size / 1000.0 * 0.1);
+        let securityCost = comp.security_cost || (log.protocol === 'TLS' ? 0.1 : 0.3);
+        let reliabilityCost = comp.reliability_cost || ((raw.error_rate || 0) * 100);
         
         decisionComponents.push({
             latency: latencyCost,
@@ -450,29 +502,17 @@ function updateDashboard(logs) {
     document.getElementById('protocol-switches').textContent = switchCount;
     
     // Update security and reliability scores from components if available
-    if (lastLog.tls_components) {
-        // Show raw security scores (not weighted)
-        const tlsSecurityRaw = lastLog.tls_components.raw_metrics ? 
-            (lastLog.protocol === 'TLS' ? 0.1 : 0.3) : 0.1;
-        const tcpSecurityRaw = lastLog.tcp_components ? 0.3 : 0.3;
-        
-        // Calculate actual reliability: 1 - error_rate
-        const tlsReliabilityRaw = lastLog.tls_components.raw_metrics ? 
-            (1 - lastLog.tls_components.raw_metrics.error_rate) : 1.0;
-        const tcpReliabilityRaw = lastLog.tcp_components ? 
-            (1 - lastLog.tcp_components.raw_metrics.error_rate) : 1.0;
-        
-        document.getElementById('security-score').textContent = 
-            lastLog.protocol === 'TLS' ? tlsSecurityRaw.toFixed(3) : tcpSecurityRaw.toFixed(3);
-        document.getElementById('reliability-score').textContent = 
-            lastLog.protocol === 'TLS' ? tlsReliabilityRaw.toFixed(3) : tcpReliabilityRaw.toFixed(3);
-    } else {
-        // Fallback to protocol-based defaults
-        const securityScore = lastLog.protocol === 'TLS' ? '0.100' : '0.300';
-        const reliabilityScore = '1.000'; // Default reliability (100%)
-        document.getElementById('security-score').textContent = securityScore;
-        document.getElementById('reliability-score').textContent = reliabilityScore;
+    let securityScore = lastLog.protocol === 'TLS' ? 0.100 : 0.300;
+    let reliabilityScore = 1.000;
+    
+    if (lastLog.tls_components && lastLog.tls_components.raw_metrics) {
+        reliabilityScore = 1 - lastLog.tls_components.raw_metrics.error_rate;
+    } else if (lastLog.tcp_components && lastLog.tcp_components.raw_metrics) {
+        reliabilityScore = 1 - lastLog.tcp_components.raw_metrics.error_rate;
     }
+    
+    document.getElementById('security-score').textContent = securityScore.toFixed(3);
+    document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
 
     // Update status badge
     const statusDot = document.querySelector('.status-dot');
@@ -512,11 +552,12 @@ function updateDashboard(logs) {
     rttChart.data.datasets[1].data = tcpRtts;
     rttChart.update('none');
 
-    // Handshake
-    handshakeChart.data.labels = labels;
-    handshakeChart.data.datasets[0].data = tlsHandshakes;
-    handshakeChart.data.datasets[1].data = tcpHandshakes;
-    handshakeChart.update('none');
+    // Outcome
+    outcomeChart.data.labels = labels;
+    outcomeChart.data.datasets[0].data = outcomes;
+    outcomeChart.data.datasets[0].backgroundColor = outcomeColors;
+    outcomeChart.data.datasets[0].borderColor = outcomeBorders;
+    outcomeChart.update('none');
 
     // Scores
     scoresChart.data.labels = labels;
@@ -524,10 +565,13 @@ function updateDashboard(logs) {
     scoresChart.data.datasets[1].data = tcpScores;
     scoresChart.update('none');
     
-    // Decision Score Comparison - simple line chart
+    // Decision Component Breakdown - stacked bar chart
     decisionBreakdownChart.data.labels = labels;
-    decisionBreakdownChart.data.datasets[0].data = tlsScores;
-    decisionBreakdownChart.data.datasets[1].data = tcpScores;
+    decisionBreakdownChart.data.datasets[0].data = decisionComponents.map(c => c.latency);
+    decisionBreakdownChart.data.datasets[1].data = decisionComponents.map(c => c.handshake);
+    decisionBreakdownChart.data.datasets[2].data = decisionComponents.map(c => c.payload);
+    decisionBreakdownChart.data.datasets[3].data = decisionComponents.map(c => c.security);
+    decisionBreakdownChart.data.datasets[4].data = decisionComponents.map(c => c.reliability);
     decisionBreakdownChart.update('none');
 
     // ── Update Log Table ──
@@ -722,32 +766,13 @@ function setupControls() {
         }
     });
     
-    // Probe Network Button
-    document.getElementById('probe-network').addEventListener('click', async () => {
-        showNotification('Probing network 3 times...', 'info');
-        try {
-            const response = await fetch('/api/probe-network', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ count: 3 })
-            });
-            if (response.ok) {
-                const results = await response.json();
-                showNotification('Network probe completed', 'success');
-                console.log('Probe results:', results);
-            }
-        } catch (error) {
-            showNotification('Failed to probe network', 'error');
-        }
-    });
-    
     // Reset Delays Button
     document.getElementById('reset-delays').addEventListener('click', async () => {
         try {
             const response = await fetch('/api/reset-delays', { method: 'POST' });
             if (response.ok) {
-                document.getElementById('tls-delay').value = 20;
-                document.getElementById('tcp-delay').value = 20;
+                document.getElementById('tls-delay').value = 0;
+                document.getElementById('tcp-delay').value = 0;
                 document.getElementById('error-rate').value = 0;
                 showNotification('Delays reset to default', 'success');
             }
@@ -797,11 +822,10 @@ function setupControls() {
                         rttChart.data.datasets[1].data = [];
                         rttChart.update();
                     }
-                    if (handshakeChart) {
-                        handshakeChart.data.labels = [];
-                        handshakeChart.data.datasets[0].data = [];
-                        handshakeChart.data.datasets[1].data = [];
-                        handshakeChart.update();
+                    if (outcomeChart) {
+                        outcomeChart.data.labels = [];
+                        outcomeChart.data.datasets[0].data = [];
+                        outcomeChart.update();
                     }
                     if (scoresChart) {
                         scoresChart.data.labels = [];
@@ -811,8 +835,7 @@ function setupControls() {
                     }
                     if (decisionBreakdownChart) {
                         decisionBreakdownChart.data.labels = [];
-                        decisionBreakdownChart.data.datasets[0].data = [];
-                        decisionBreakdownChart.data.datasets[1].data = [];
+                        decisionBreakdownChart.data.datasets.forEach(ds => { ds.data = []; });
                         decisionBreakdownChart.update();
                     }
                     

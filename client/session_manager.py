@@ -44,6 +44,9 @@ class SessionManager:
         self.last_eval_time = time.time()
         self.error_counts = {"TLS": 0, "TCP": 0}
         self.last_errors = {"TLS": None, "TCP": None}
+        self._last_handshake_time = {"TLS": 0.0, "TCP": 0.0}
+        self._success_counts = {"TLS": 0, "TCP": 0}
+        self._failure_counts = {"TLS": 0, "TCP": 0}
         
         # Simulation settings
         self.simulation_config = self._load_simulation_config()
@@ -77,9 +80,12 @@ class SessionManager:
     def connect_tls(self):
         """Establish an HTTP keep-alive session to the TLS server."""
         self.close_all()
+        start_handshake = time.perf_counter()
         self._http_session = requests.Session()
         # Verify the connection works
         self._http_session.get(f"{self.tls_url}/api/health", verify=False, timeout=10)
+        end_handshake = time.perf_counter()
+        self._last_handshake_time["TLS"] = (end_handshake - start_handshake) * 1000
         self.active_protocol = "TLS"
         self.request_count = 0
         print(f"[Session] Connected to TLS server at {self.tls_url}")
@@ -87,6 +93,7 @@ class SessionManager:
     def connect_tcp(self):
         """Establish a persistent TCP connection with HELLO→ACK handshake."""
         self.close_all()
+        start_handshake = time.perf_counter()
         self._tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._tcp_socket.settimeout(10)
         self._tcp_socket.connect((self.tcp_host, self.tcp_port))
@@ -99,6 +106,8 @@ class SessionManager:
 
         key_b64 = ack_data[4:]
         self._aes_key = base64.b64decode(key_b64)
+        end_handshake = time.perf_counter()
+        self._last_handshake_time["TCP"] = (end_handshake - start_handshake) * 1000
         self.active_protocol = "TCP"
         self.request_count = 0
         print(f"[Session] Connected to TCP server at {self.tcp_host}:{self.tcp_port}")

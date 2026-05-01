@@ -10,6 +10,7 @@ import struct
 import json
 import os
 import uuid
+import random
 
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -28,11 +29,39 @@ class NetworkProber:
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
 
+    def _load_simulation_config(self):
+        """Load simulation configuration from file."""
+        try:
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            config_file = os.path.join(project_root, "logs", "simulation_config.json")
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {"tls_delay_ms": 0, "tcp_delay_ms": 0, "error_rate": 0.0}
+
     def probe_tls(self) -> dict:
         """
         Probe the TLS server.
         Returns dict with: handshake_time, rtt, payload_size, success
         """
+        config = self._load_simulation_config()
+        delay_ms = config.get("tls_delay_ms", 0)
+        error_rate = config.get("error_rate", 0.0)
+
+        # Simulate error
+        if error_rate > 0 and random.random() < error_rate:
+            return {
+                "protocol": "TLS",
+                "handshake_time": 9999.0,
+                "rtt": 9999.0,
+                "payload_size": 0,
+                "success": False,
+                "error": f"Simulated error (TLS) - {error_rate * 100:.1f}% error rate",
+                "error_rate": error_rate,
+            }
+
         try:
             # Measure full request (includes TLS handshake on new connection)
             session = requests.Session()
@@ -45,7 +74,7 @@ class NetworkProber:
                 timeout=10
             )
             end_handshake = time.perf_counter()
-            handshake_time = (end_handshake - start_handshake) * 1000  # ms
+            handshake_time = (end_handshake - start_handshake) * 1000 + delay_ms  # ms
 
             # Measure RTT with a second request (connection already established)
             start_rtt = time.perf_counter()
@@ -55,7 +84,7 @@ class NetworkProber:
                 timeout=10
             )
             end_rtt = time.perf_counter()
-            rtt = (end_rtt - start_rtt) * 1000  # ms
+            rtt = (end_rtt - start_rtt) * 1000 + delay_ms  # ms
 
             payload_size = len(response2.content)
             session.close()
@@ -66,6 +95,7 @@ class NetworkProber:
                 "rtt": round(rtt, 3),
                 "payload_size": payload_size,
                 "success": True,
+                "error_rate": error_rate,
             }
         except Exception as e:
             return {
@@ -75,6 +105,7 @@ class NetworkProber:
                 "payload_size": 0,
                 "success": False,
                 "error": str(e),
+                "error_rate": error_rate,
             }
 
     def probe_tcp(self) -> dict:
@@ -82,6 +113,22 @@ class NetworkProber:
         Probe the TCP server.
         Returns dict with: handshake_time, rtt, payload_size, success
         """
+        config = self._load_simulation_config()
+        delay_ms = config.get("tcp_delay_ms", 0)
+        error_rate = config.get("error_rate", 0.0)
+
+        # Simulate error
+        if error_rate > 0 and random.random() < error_rate:
+            return {
+                "protocol": "TCP",
+                "handshake_time": 9999.0,
+                "rtt": 9999.0,
+                "payload_size": 0,
+                "success": False,
+                "error": f"Simulated error (TCP) - {error_rate * 100:.1f}% error rate",
+                "error_rate": error_rate,
+            }
+
         sock = None
         try:
             # Measure TCP connection + custom handshake
@@ -100,7 +147,7 @@ class NetworkProber:
                 raise Exception(f"Invalid handshake response: {ack_data}")
 
             end_handshake = time.perf_counter()
-            handshake_time = (end_handshake - start_handshake) * 1000  # ms
+            handshake_time = (end_handshake - start_handshake) * 1000 + delay_ms  # ms
 
             # Extract AES key
             key_b64 = ack_data[4:]
@@ -135,7 +182,7 @@ class NetworkProber:
             plaintext = aesgcm.decrypt(resp_nonce, resp_ciphertext, None)
 
             end_rtt = time.perf_counter()
-            rtt = (end_rtt - start_rtt) * 1000  # ms
+            rtt = (end_rtt - start_rtt) * 1000 + delay_ms  # ms
 
             payload_size = len(plaintext)
             sock.close()
@@ -146,6 +193,7 @@ class NetworkProber:
                 "rtt": round(rtt, 3),
                 "payload_size": payload_size,
                 "success": True,
+                "error_rate": error_rate,
             }
         except Exception as e:
             if sock:
@@ -157,6 +205,7 @@ class NetworkProber:
                 "payload_size": 0,
                 "success": False,
                 "error": str(e),
+                "error_rate": error_rate,
             }
 
     def probe_both(self) -> dict:
