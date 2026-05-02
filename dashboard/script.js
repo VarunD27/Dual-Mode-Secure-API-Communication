@@ -135,7 +135,7 @@ function initCharts() {
                     callbacks: {
                         label: (ctx) => {
                             const protocol = ctx.raw.protocol;
-                            return protocol === 'TLS' ? '🔒 TLS (Secure)' : '⚡ TCP (Fast)';
+                            return protocol === 'TLS' ? 'TLS (Secure)' : 'TCP (Fast)';
                         },
                     },
                 },
@@ -596,20 +596,18 @@ function updateLogTable(logs) {
     tbody.innerHTML = recentLogs.map(log => {
         const isTLS = log.protocol === 'TLS';
         const protoClass = isTLS ? 'proto-tls' : 'proto-tcp';
-        const protoIcon = isTLS ? '🔒' : '⚡';
         const statusClass = log.status === 'ok' ? 'status-ok' : 'status-error';
         const time = new Date(log.timestamp * 1000).toLocaleTimeString();
-        
+
         // Determine request type
         const requestType = log.request_type || (log.request_id <= 50 ? 'AUTO' : 'MANUAL');
         const typeClass = requestType === 'AUTO' ? 'type-auto' : 'type-manual';
-        const typeIcon = requestType === 'AUTO' ? '🤖' : '👤';
 
         return `<tr>
             <td>${log.request_id}</td>
             <td>${time}</td>
-            <td><span class="type-badge ${typeClass}">${typeIcon} ${requestType}</span></td>
-            <td><span class="proto-badge ${protoClass}">${protoIcon} ${log.protocol}</span></td>
+            <td><span class="type-badge ${typeClass}">${requestType}</span></td>
+            <td><span class="proto-badge ${protoClass}">${log.protocol}</span></td>
             <td>${log.action}</td>
             <td>${log.rtt_ms.toFixed(1)}</td>
             <td>${log.handshake_time_ms.toFixed(1)}</td>
@@ -1013,7 +1011,7 @@ function displayNetworkConfig(data) {
     // Create TLS row
     const tlsRow = document.createElement('tr');
     tlsRow.innerHTML = `
-        <td class="protocol-cell tls-protocol">🔒 TLS</td>
+        <td class="protocol-cell tls-protocol">TLS</td>
         <td class="value-cell">${data.tls_rtt !== undefined ? `${data.tls_rtt.toFixed(2)} ms` : '—'}</td>
         <td class="value-cell">${data.tls_handshake !== undefined ? `${data.tls_handshake.toFixed(2)} ms` : '—'}</td>
         ${showComprehensive ? `<td class="value-cell">${data.tls_payload !== undefined ? `${data.tls_payload} B` : '—'}</td>` : ''}
@@ -1026,7 +1024,7 @@ function displayNetworkConfig(data) {
     // Create TCP row
     const tcpRow = document.createElement('tr');
     tcpRow.innerHTML = `
-        <td class="protocol-cell tcp-protocol">⚡ TCP</td>
+        <td class="protocol-cell tcp-protocol">TCP</td>
         <td class="value-cell">${data.tcp_rtt !== undefined ? `${data.tcp_rtt.toFixed(2)} ms` : '—'}</td>
         <td class="value-cell">${data.tcp_handshake !== undefined ? `${data.tcp_handshake.toFixed(2)} ms` : '—'}</td>
         ${showComprehensive ? `<td class="value-cell">${data.tcp_payload !== undefined ? `${data.tcp_payload} B` : '—'}</td>` : ''}
@@ -1039,8 +1037,8 @@ function displayNetworkConfig(data) {
     // Update title based on state
     const title = document.getElementById('config-title');
     title.textContent = showComprehensive 
-        ? '🔍 Network Configuration - Comprehensive Analysis (Running Requests)'
-        : '🔍 Network Configuration - Basic Analysis (Idle)';
+        ? 'Network Configuration - Comprehensive Analysis'
+        : 'Network Configuration - Basic Analysis';
     
     // Show the configuration section
     const configSection = document.getElementById('network-config');

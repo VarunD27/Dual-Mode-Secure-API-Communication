@@ -47,7 +47,7 @@
                     <span class="status-dot"></span>
                     <span class="status-text">Waiting for data...</span>
                 </div>
-                <div class="refresh-timer" id="refresh-timer">↻ 2s</div>
+                <div class="refresh-timer" id="refresh-timer">Refresh: 2s</div>
             </div>
         </div>
     </header>
@@ -57,32 +57,37 @@
         <div class="chart-card">
             <div class="chart-header">
                 <h2>Network Simulation</h2>
-                <span class="chart-badge badge-red">Manual Control</span>
+                <span class="chart-badge badge-amber">Control Panel</span>
             </div>
             <div class="control-panel">
-                <div class="control-group">
-                    <button id="run-auto-30" class="btn btn-primary">🚀 Run 30 Auto</button>
-                    <button id="stop-auto" class="btn btn-danger">⏹️ Stop</button>
+                <div class="control-row control-row-main">
+                    <button id="run-auto-30" class="btn btn-primary">Run 30 Auto</button>
+                    <button id="stop-auto" class="btn btn-danger">Stop</button>
                 </div>
-                <div class="control-group">
-                    <label for="tls-delay">TLS Delay:</label>
-                    <input type="number" id="tls-delay" value="0" min="0" max="500" step="10">
-                    <button id="apply-tls-delay" class="btn btn-primary">Apply</button>
+                <div class="control-row control-row-params">
+                    <div class="control-group">
+                        <label for="tls-delay">TLS Delay</label>
+                        <input type="number" id="tls-delay" value="0" min="0" max="500" step="10">
+                        <span class="unit">ms</span>
+                        <button id="apply-tls-delay" class="btn btn-secondary">Apply</button>
+                    </div>
+                    <div class="control-group">
+                        <label for="tcp-delay">TCP Delay</label>
+                        <input type="number" id="tcp-delay" value="0" min="0" max="500" step="10">
+                        <span class="unit">ms</span>
+                        <button id="apply-tcp-delay" class="btn btn-secondary">Apply</button>
+                    </div>
+                    <div class="control-group">
+                        <label for="error-rate">Error Rate</label>
+                        <input type="number" id="error-rate" value="0" min="0" max="100" step="1">
+                        <span class="unit">%</span>
+                        <button id="apply-error-rate" class="btn btn-secondary">Apply</button>
+                    </div>
                 </div>
-                <div class="control-group">
-                    <label for="tcp-delay">TCP Delay:</label>
-                    <input type="number" id="tcp-delay" value="0" min="0" max="500" step="10">
-                    <button id="apply-tcp-delay" class="btn btn-secondary">Apply</button>
-                </div>
-                <div class="control-group">
-                    <label for="error-rate">Error Rate (%):</label>
-                    <input type="number" id="error-rate" value="0" min="0" max="100" step="1">
-                    <button id="apply-error-rate" class="btn btn-warning">Apply</button>
-                </div>
-                <div class="control-group">
-                    <button id="probe-network" class="btn btn-info">🔍 Probe Network</button>
-                    <button id="reset-delays" class="btn btn-secondary">🔄 Reset</button>
-                    <button id="clear-logs" class="btn btn-danger">🗑️ Clear</button>
+                <div class="control-row control-row-utils">
+                    <button id="probe-network" class="btn btn-accent">Probe Network</button>
+                    <button id="reset-delays" class="btn btn-secondary">Reset</button>
+                    <button id="clear-logs" class="btn btn-danger">Clear</button>
                 </div>
             </div>
         </div>
@@ -91,7 +96,7 @@
     <!-- ── Network Configuration Display (hidden by default) ── -->
     <section class="network-config" id="network-config" style="display: none;">
         <div class="config-container">
-            <h3 id="config-title">🔍 Network Configuration - Decision Engine Analysis</h3>
+            <h3 id="config-title">Network Configuration</h3>
             <div class="config-table-wrapper">
                 <table class="config-table" id="config-table">
                     <thead id="config-thead">
