@@ -11,11 +11,11 @@ This project implements an **adaptive client-server API communication system** t
 
 ### 🎯 Key Achievements
 
-✅ **Dual-Protocol Communication System** - TLS 1.3 + Enhanced TCP with AES-GCM  
+✅ **Dual-Protocol Communication System** - TLS 1.3 + Enhanced TCP with ECDH+AES-GCM  
 ✅ **Session-Based Adaptive Selection** - Real-time protocol switching  
-✅ **Multi-Metric Decision Engine** - 5-factor scoring model  
+✅ **Multi-Metric Decision Engine** - 5-factor scoring model with normalized metrics (w: 0.30, 0.20, 0.10, 0.25, 0.15)
 ✅ **Stability-Aware Switching** - Hysteresis with 15% threshold  
-✅ **Enhanced Security** - Replay attack prevention with nonce/timestamp  
+✅ **Enhanced Security** - ECDH key exchange, HMAC authentication, replay attack prevention  
 ✅ **Packet Loss Simulation** - Configurable network conditions  
 ✅ **Comprehensive Dashboard** - Real-time visualization with 7 charts  
 ✅ **Robust Error Handling** - Retries, fallbacks, and reconnection  

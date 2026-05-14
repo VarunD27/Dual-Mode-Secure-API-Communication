@@ -159,147 +159,88 @@ class DashboardHandler(SimpleHTTPRequestHandler):
     
     def _probe_network(self):
         """Probe network and return configuration data."""
-        print(f"[Dashboard Debug] _probe_network method called")
+        print("[Dashboard] Probe network called")
+
         try:
-            # Read any POST data
+            # Read request body (ignore content)
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 self.rfile.read(content_length)
-            
-            # Perform actual probing
-            sys.path.insert(0, PROJECT_ROOT)
-            from client.network_prober import NetworkProber
-            from client.decision_engine import DecisionEngine
-            
+
+            # FIX 1: Ensure correct import path
+            if PROJECT_ROOT not in sys.path:
+                sys.path.insert(0, PROJECT_ROOT)
+
+            try:
+                from client.network_prober import NetworkProber
+                from client.decision_engine import DecisionEngine
+            except Exception as import_error:
+                print("[Dashboard ERROR] Import failed:", import_error)
+                raise import_error
+
+            # FIX 2: Run prober
             prober = NetworkProber()
             results = prober.probe_both()
+
+            print("[Dashboard] Probe Results:", results)
+
+            # FIX 3: Validate probe results
+            if not results or "TLS" not in results or "TCP" not in results:
+                raise Exception("Invalid probe results")
+
+            # FIX 4: Run decision engine
             engine = DecisionEngine()
             evaluation = engine.evaluate(results["TLS"], results["TCP"])
-            
-            # Check if there are existing logs to determine if requests are running
-            all_logs = []
-            
-            # Load session logs
-            if os.path.exists(SESSION_LOG_FILE):
-                try:
-                    with open(SESSION_LOG_FILE, "r") as f:
-                        session_logs = json.load(f)
-                        all_logs.extend(session_logs)
-                except (json.JSONDecodeError, IOError):
-                    pass
-            
-            # Load manual logs
-            if os.path.exists(MANUAL_LOG_FILE):
-                try:
-                    with open(MANUAL_LOG_FILE, "r") as f:
-                        manual_logs = json.load(f)
-                        all_logs.extend(manual_logs)
-                except (json.JSONDecodeError, IOError):
-                    pass
-            
-            has_logs = len(all_logs)
-            
-            # Debug the error_rate values
-            tls_error_rate = evaluation["tls_components"]["raw_metrics"]["error_rate"]
-            tcp_error_rate = evaluation["tcp_components"]["raw_metrics"]["error_rate"]
-            print(f"[Dashboard Debug] TLS error_rate: {tls_error_rate}")
-            print(f"[Dashboard Debug] TCP error_rate: {tcp_error_rate}")
-            
+
+            print("[Dashboard] Evaluation:", evaluation)
+
+            # Extract error rates safely
+            tls_reliability = evaluation["tls_components"]["normalized"].get("reliability", 1.0)
+            tcp_reliability = evaluation["tcp_components"]["normalized"].get("reliability", 1.0)
+            # ✅ FINAL DATA (REAL VALUES)
             data = {
-                "tls_rtt": results["TLS"].get("rtt", 0),
-                "tcp_rtt": results["TCP"].get("rtt", 0),
-                "tls_handshake": results["TLS"].get("handshake_time", 0),
-                "tcp_handshake": results["TCP"].get("handshake_time", 0),
+                "tls_rtt": results["TLS"]["rtt"],
+                "tcp_rtt": results["TCP"]["rtt"],
+                "tls_handshake": results["TLS"]["handshake_time"],
+                "tcp_handshake": results["TCP"]["handshake_time"],
                 "tls_score": evaluation["tls_score"],
                 "tcp_score": evaluation["tcp_score"],
-                # Raw values without weight multiplication
-                "tls_payload": results["TLS"].get("payload_size", 0),
-                "tcp_payload": results["TCP"].get("payload_size", 0),
-                "tls_security": 1.0,  # Fixed security value for TLS (lower is better)
-                "tcp_security": 5.0,  # Fixed security value for TCP (higher is better)
-                # Include reliability scores (1.0 for perfect, lower for errors) instead of costs
-                "tls_reliability": 1.0 - tls_error_rate,
-                "tcp_reliability": 1.0 - tcp_error_rate,
-                # Add log count for detection
-                "has_logs": has_logs,
+                "tls_payload": results["TLS"]["payload_size"],
+                "tcp_payload": results["TCP"]["payload_size"],
+                "tls_security": 1.0,
+                "tcp_security": 5.0,
+                "tls_reliability": 1.0 - tls_reliability,
+                "tcp_reliability": 1.0 - tcp_reliability,
+                "has_logs": 0
             }
-            
-            # Debug logging to see what data is being sent
-            print(f"[Dashboard Debug] Data being sent: {data}")
-            print(f"[Dashboard Debug] TLS payload: {data['tls_payload']}")
-            print(f"[Dashboard Debug] TCP payload: {data['tcp_payload']}")
-            print(f"[Dashboard Debug] TLS security: {data['tls_security']}")
-            print(f"[Dashboard Debug] TCP security: {data['tcp_security']}")
-            print(f"[Dashboard Debug] TLS reliability: {data['tls_reliability']}")
-            print(f"[Dashboard Debug] TCP reliability: {data['tcp_reliability']}")
-            
+
+            print("[Dashboard] Sending Data:", data)
+
             response = json.dumps({"success": True, "data": data})
+
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(response)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(response.encode())
-            print(f"[Dashboard] Probe network completed successfully")
-            
+
         except Exception as e:
-            print(f"[Dashboard] Probe network error: {e}")
-            # Fallback to current settings
-            try:
-                # Load logs for fallback case
-                all_logs = []
-                
-                # Load session logs
-                if os.path.exists(SESSION_LOG_FILE):
-                    try:
-                        with open(SESSION_LOG_FILE, "r") as f:
-                            session_logs = json.load(f)
-                            all_logs.extend(session_logs)
-                    except (json.JSONDecodeError, IOError):
-                        pass
-                
-                # Load manual logs
-                if os.path.exists(MANUAL_LOG_FILE):
-                    try:
-                        with open(MANUAL_LOG_FILE, "r") as f:
-                            manual_logs = json.load(f)
-                            all_logs.extend(manual_logs)
-                    except (json.JSONDecodeError, IOError):
-                        pass
-                
-                has_logs = len(all_logs)
-                
-                data = {
-                    "tls_rtt": 0,
-                    "tcp_rtt": 0,
-                    "tls_handshake": 0,
-                    "tcp_handshake": 0,
-                    "tls_score": 0,
-                    "tcp_score": 0,
-                    "tls_payload": 0,
-                    "tcp_payload": 0,
-                    "tls_security": 1.0,
-                    "tcp_security": 5.0,
-                    "tls_reliability": 1.0,  # Perfect reliability when no data
-                    "tcp_reliability": 1.0,  # Perfect reliability when no data
-                    "has_logs": has_logs,
-                }
-                response = json.dumps({"success": True, "data": data})
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(response)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(response.encode())
-            except Exception as fallback_err:
-                error_response = json.dumps({"success": False, "error": str(fallback_err)})
-                self.send_response(500)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(error_response)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                self.wfile.write(error_response.encode())
-    
+            print("[Dashboard ERROR] Probe failed:", str(e))
+
+            # ❌ REMOVE SILENT ZERO FALLBACK → instead send error
+            response = json.dumps({
+                "success": False,
+                "error": str(e)
+            })
+
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(response.encode())
+
     def _reset_delays(self):
         """Reset all delays to default."""
         try:
@@ -381,8 +322,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     auto_client_process = subprocess.Popen(
                         ["python", "adaptive_client.py", "--count", "30"], 
                         cwd=client_path, 
-                        stdout=subprocess.PIPE, 
-                        stderr=subprocess.PIPE,
+                        stdout=None, 
+                        stderr=None,
                         creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == 'nt' else 0
                     )
                     auto_client_process.wait()

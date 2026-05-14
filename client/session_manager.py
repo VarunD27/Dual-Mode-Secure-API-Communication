@@ -11,9 +11,14 @@ import time
 import base64
 import uuid
 import random
+import hmac
+import hashlib
 
 import requests
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # Suppress insecure request warnings
 import urllib3
@@ -32,6 +37,12 @@ class SessionManager:
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self._fallback_enabled = enable_fallback
+
+        #For authentication
+        self.cert_path = os.path.join(os.path.dirname(os.path.dirname(__file__)),"certs","server.crt")
+
+        #For client id tracking
+        self.client_id = str(uuid.uuid4())
 
         # Active connections
         self._http_session = None
@@ -83,7 +94,12 @@ class SessionManager:
         start_handshake = time.perf_counter()
         self._http_session = requests.Session()
         # Verify the connection works
-        self._http_session.get(f"{self.tls_url}/api/health", verify=False, timeout=10)
+        cert_path = self.cert_path
+        self._http_session.get(
+            f"{self.tls_url}/api/health",
+            verify=cert_path,
+            timeout=10
+        )
         end_handshake = time.perf_counter()
         self._last_handshake_time["TLS"] = (end_handshake - start_handshake) * 1000
         self.active_protocol = "TLS"
@@ -91,26 +107,63 @@ class SessionManager:
         print(f"[Session] Connected to TLS server at {self.tls_url}")
 
     def connect_tcp(self):
-        """Establish a persistent TCP connection with HELLO→ACK handshake."""
+        """Establish secure TCP connection using ECDH + authenticated HELLO."""
         self.close_all()
+
         start_handshake = time.perf_counter()
         self._tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._tcp_socket.settimeout(10)
         self._tcp_socket.connect((self.tcp_host, self.tcp_port))
 
-        # Custom handshake
-        self._tcp_socket.sendall(b"HELLO")
-        ack_data = self._tcp_socket.recv(1024).decode("utf-8")
-        if not ack_data.startswith("ACK:"):
-            raise Exception(f"TCP handshake failed: {ack_data}")
+        # ── Step 1: Send authenticated HELLO (framed JSON) ──
+        client_secret = b"my_shared_secret"
+        timestamp = str(time.time())
+        signature = hmac.new(
+            client_secret,
+            timestamp.encode(),
+            hashlib.sha256
+        ).hexdigest()
 
-        key_b64 = ack_data[4:]
-        self._aes_key = base64.b64decode(key_b64)
+        hello_msg = json.dumps({
+            "type": "HELLO",
+            "timestamp": timestamp,
+            "signature": signature
+        }).encode("utf-8")
+
+        # Frame the HELLO message (4-byte length prefix)
+        hello_framed = struct.pack("!I", len(hello_msg)) + hello_msg
+        self._tcp_socket.sendall(hello_framed)
+
+        # ── Step 2: ECDH key exchange ──
+        client_private_key = ec.generate_private_key(ec.SECP256R1())
+        client_public_key = client_private_key.public_key()
+
+        client_pub_bytes = client_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+
+        self._tcp_socket.sendall(client_pub_bytes)
+
+        server_pub_bytes = self._tcp_socket.recv(1024)
+        server_public_key = serialization.load_pem_public_key(server_pub_bytes)
+
+        shared_secret = client_private_key.exchange(ec.ECDH(), server_public_key)
+
+        self._aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=b'handshake data',
+        ).derive(shared_secret)
+
         end_handshake = time.perf_counter()
         self._last_handshake_time["TCP"] = (end_handshake - start_handshake) * 1000
+
         self.active_protocol = "TCP"
         self.request_count = 0
-        print(f"[Session] Connected to TCP server at {self.tcp_host}:{self.tcp_port}")
+
+        print(f"[Session] Secure TCP connection established (ECDH)")
 
     def connect(self, protocol: str):
         """Connect to the specified protocol."""
@@ -186,13 +239,13 @@ class SessionManager:
                     response = self._http_session.post(
                         f"{self.tls_url}/api/{action}",
                         json=payload or {"message": "test"},
-                        verify=False,
+                        verify=self.cert_path,
                         timeout=10,
                     )
                 else:
                     response = self._http_session.get(
                         f"{self.tls_url}/api/{action}",
-                        verify=False,
+                        verify=self.cert_path,
                         timeout=10,
                     )
 
@@ -253,17 +306,25 @@ class SessionManager:
                 # Build request with nonce and timestamp for replay protection
                 request_data = {
                     "action": action,
-                    "nonce": str(uuid.uuid4()),  # Unique nonce for each request
-                    "timestamp": time.time()     # Current timestamp
+                    "nonce": str(uuid.uuid4()),
+                    "timestamp": round(time.time(), 3),
+                    "client_id": self.client_id
                 }
+
                 if payload:
                     request_data["payload"] = payload
+
+                # ADD HASH BEFORE ENCRYPTION
+                request_data["hash"] = hashlib.sha256(
+                    json.dumps(request_data, sort_keys=True).encode()
+                ).hexdigest()
                 plaintext = json.dumps(request_data).encode("utf-8")
 
                 # Encrypt
                 aesgcm = AESGCM(self._aes_key)
                 nonce = os.urandom(12)
-                ciphertext = aesgcm.encrypt(nonce, plaintext, None)
+                aad = b"session-bound-data"
+                ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
                 encrypted = nonce + ciphertext
 
                 # Send length-prefixed
@@ -284,7 +345,7 @@ class SessionManager:
                 aesgcm = AESGCM(self._aes_key)
                 nonce = encrypted_response[:12]
                 ciphertext = encrypted_response[12:]
-                response_plaintext = aesgcm.decrypt(nonce, ciphertext, None)
+                response_plaintext = aesgcm.decrypt(nonce, ciphertext, aad)
                 data = json.loads(response_plaintext.decode("utf-8"))
                 
                 elapsed = (time.perf_counter() - start) * 1000  # ms

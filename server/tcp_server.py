@@ -3,11 +3,10 @@ Custom TCP Server — Raw socket (port 6000) with AES-GCM encryption.
 Uses a custom HELLO→ACK handshake and length-prefixed JSON framing.
 
 Protocol:
-  1. Client connects via TCP
-  2. Client sends: HELLO
-  3. Server responds: ACK:<base64-encoded-aes-key>
-  4. All subsequent messages are AES-256-GCM encrypted
-  5. Message format: [4-byte length][nonce (12 bytes)][tag (16 bytes)][ciphertext]
+  1. Client sends HELLO (authenticated)
+  2. ECDH key exchange
+  3. Shared AES key derived securely
+  4. All messages AES-GCM encrypted
 """
 
 import os
@@ -22,12 +21,16 @@ import time
 import hashlib
 import random
 from collections import defaultdict
+import hmac
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from server.shared_api import handle_request, inject_delay
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 # Default settings
 ARTIFICIAL_DELAY_MS = 20.0
@@ -110,7 +113,8 @@ def encrypt_message(key: bytes, plaintext: bytes) -> bytes:
     """
     aesgcm = AESGCM(key)
     nonce = os.urandom(12)  # 96-bit nonce
-    ciphertext = aesgcm.encrypt(nonce, plaintext, None)  # ciphertext includes 16-byte tag
+    aad = b"session-bound-data"
+    ciphertext = aesgcm.encrypt(nonce, plaintext, aad)
     return nonce + ciphertext
 
 
@@ -122,7 +126,8 @@ def decrypt_message(key: bytes, data: bytes) -> bytes:
     aesgcm = AESGCM(key)
     nonce = data[:12]
     ciphertext = data[12:]
-    return aesgcm.decrypt(nonce, ciphertext, None)
+    aad = b"session-bound-data"
+    return aesgcm.decrypt(nonce, ciphertext, aad)
 
 
 def send_framed(sock: socket.socket, data: bytes):
@@ -155,24 +160,68 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
 
 def handle_client(client_sock: socket.socket, addr: tuple):
     """Handle a single client connection."""
-    print(f"[TCP Server] New connection from {addr}")
     client_id = f"{addr[0]}:{addr[1]}"
-
     try:
         # ── Step 1: Custom Handshake ──
         # Wait for HELLO from client
-        hello = client_sock.recv(1024).decode("utf-8").strip()
-        if hello != "HELLO":
-            print(f"[TCP Server] Invalid handshake from {addr}: {hello}")
+        hello_raw = recv_framed(client_sock)
+        if not hello_raw:
+            print("[TCP Server] Empty HELLO received")
+            client_sock.close()
+            return
+        try:
+            hello = json.loads(hello_raw.decode())
+        except Exception as e:
+            print("[TCP Server] Invalid HELLO format:", hello_raw)
+            client_sock.close()
+            return
+        timestamp = float(hello.get("timestamp"))
+        signature = hello.get("signature")
+
+        # Timestamp validation
+        if abs(time.time() - timestamp) > 30:
+            print("[TCP Server] Stale HELLO timestamp")
             client_sock.close()
             return
 
-        # Generate AES key and send ACK with key
-        aes_key = generate_aes_key()
-        key_b64 = base64.b64encode(aes_key).decode("utf-8")
-        ack_msg = f"ACK:{key_b64}"
-        client_sock.sendall(ack_msg.encode("utf-8"))
-        print(f"[TCP Server] Handshake complete with {addr}")
+        client_secret = b"my_shared_secret"
+        expected_sig = hmac.new(
+            client_secret,
+            str(timestamp).encode(),
+            hashlib.sha256
+        ).hexdigest()
+
+        if signature != expected_sig:
+            print("[TCP Server] Invalid client authentication")
+            client_sock.close()
+            return
+
+        # Step 1: Server generates ECDH key pair
+        server_private_key = ec.generate_private_key(ec.SECP256R1())
+        server_public_key = server_private_key.public_key()
+
+        # Receive client public key
+        client_pub_bytes = client_sock.recv(1024)
+        client_public_key = serialization.load_pem_public_key(client_pub_bytes)
+
+        # Send server public key
+        server_pub_bytes = server_public_key.public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        client_sock.sendall(server_pub_bytes)
+
+        # Derive shared key
+        shared_secret = server_private_key.exchange(ec.ECDH(), client_public_key)
+
+        aes_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=b'handshake data',
+        ).derive(shared_secret)
+
+        print(f"[TCP Server] Secure ECDH handshake complete with {addr}")
 
         # ── Step 2: Handle encrypted requests ──
         while True:
@@ -192,9 +241,27 @@ def handle_client(client_sock: socket.socket, addr: tuple):
                 return
 
             try:
-                # Decrypt the request
                 plaintext = decrypt_message(aes_key, encrypted_data)
                 request_data = json.loads(plaintext.decode("utf-8"))
+
+                # NOW validate hash
+                recv_hash = request_data.get("hash")
+
+                data_copy = dict(request_data)
+                data_copy.pop("hash", None)
+
+                calc_hash = hashlib.sha256(
+                    json.dumps(data_copy, sort_keys=True).encode()
+                ).hexdigest()
+
+                if recv_hash != calc_hash:
+                    error_response = json.dumps({
+                    "status": "error",
+                    "message": "Tampered request detected"
+                }).encode("utf-8")
+                    encrypted_error = encrypt_message(aes_key, error_response)
+                    send_framed(client_sock, encrypted_error)
+                    continue
                 
                 # Extract nonce and timestamp for replay protection
                 nonce = request_data.get("nonce")

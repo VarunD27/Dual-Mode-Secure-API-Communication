@@ -14,6 +14,7 @@ import json
 import time
 import argparse
 import random
+import hashlib
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -23,6 +24,7 @@ from client.decision_engine import DecisionEngine
 from client.hysteresis_controller import HysteresisController
 from client.session_manager import SessionManager
 
+API_KEY = "super_secret_key"
 
 # ── Logging ────────────────────────────────────────────────────────
 
@@ -99,6 +101,11 @@ def set_stop_flag():
     except Exception:
         pass
 
+# ── ADD AUTHENTICATION ─────────────────────────────────────────────
+def sign_request(payload: dict):
+    payload_str = json.dumps(payload, sort_keys=True)
+    signature = hashlib.sha256((payload_str + API_KEY).encode()).hexdigest()
+    return signature
 
 # ── Main Client Logic ─────────────────────────────────────────────
 
@@ -133,7 +140,7 @@ def run_adaptive_client(
     """
     # Initialize components
     prober = NetworkProber(tls_host, tls_port, tcp_host, tcp_port)
-    engine = DecisionEngine(w_latency=0.5, w_handshake=0.3, w_payload=0.2)
+    engine = DecisionEngine()
     hysteresis = HysteresisController(threshold_pct=15.0, required_consecutive=3)
     session = SessionManager(tls_host, tls_port, tcp_host, tcp_port)
 
@@ -226,7 +233,8 @@ def run_adaptive_client(
 
         # Pick a random API action
         action = actions[i % len(actions)]
-        payload = {"request_id": i, "message": f"Request #{i}"} if action == "echo" else None
+        payload = {"request_id": i,"message": f"Request #{i}","timestamp": time.time()}
+        payload["signature"] = sign_request(payload) if action == "echo" else None
 
         # ── Send request ──
         current_protocol = hysteresis.get_current_protocol()

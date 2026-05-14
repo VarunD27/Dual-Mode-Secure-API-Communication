@@ -92,6 +92,7 @@ class NetworkProber:
                 "rtt": round(rtt, 3),
                 "payload_size": payload_size,
                 "success": True,
+                "error_rate": error_rate,
                 "error": None
             }
 
@@ -102,6 +103,7 @@ class NetworkProber:
                 "rtt": 9999.0,
                 "payload_size": 0,
                 "success": False,
+                "error_rate": error_rate,
                 "error": str(e)
             }
 
@@ -110,6 +112,12 @@ class NetworkProber:
         Probe the TCP server.
         Returns dict with: handshake_time, rtt, payload_size, success
         """
+        import hmac
+        import hashlib
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import serialization, hashes
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
         config = self._load_simulation_config()
         delay_ms = config.get("tcp_delay_ms", 0)
         error_rate = config.get("error_rate", 0.0)
@@ -135,33 +143,74 @@ class NetworkProber:
             sock.settimeout(10)
             sock.connect((self.tcp_host, self.tcp_port))
 
-            # Send HELLO
-            sock.sendall(b"HELLO")
+            # ── Step 1: Send authenticated HELLO (framed JSON) ──
+            client_secret = b"my_shared_secret"
+            timestamp = str(time.time())
+            signature = hmac.new(
+                client_secret,
+                timestamp.encode(),
+                hashlib.sha256
+            ).hexdigest()
 
-            # Receive ACK with AES key
-            ack_data = sock.recv(1024).decode("utf-8")
-            if not ack_data.startswith("ACK:"):
-                raise Exception(f"Invalid handshake response: {ack_data}")
+            hello_msg = json.dumps({
+                "type": "HELLO",
+                "timestamp": timestamp,
+                "signature": signature
+            }).encode("utf-8")
+            
+            # Frame the HELLO message (4-byte length prefix)
+            hello_framed = struct.pack("!I", len(hello_msg)) + hello_msg
+            sock.sendall(hello_framed)
+
+            # ── Step 2: ECDH key exchange ──
+            # Generate client ECDH key pair
+            client_private_key = ec.generate_private_key(ec.SECP256R1())
+            client_public_key = client_private_key.public_key()
+
+            client_pub_bytes = client_public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+            sock.sendall(client_pub_bytes)
+
+            # Receive server public key (raw recv, not framed)
+            server_pub_bytes = sock.recv(1024)
+            server_public_key = serialization.load_pem_public_key(server_pub_bytes)
+
+            # Derive shared AES key
+            shared_secret = client_private_key.exchange(ec.ECDH(), server_public_key)
+            aes_key = HKDF(
+                algorithm=hashes.SHA256(),
+                length=32,
+                salt=None,
+                info=b'handshake data',
+            ).derive(shared_secret)
 
             end_handshake = time.perf_counter()
             handshake_time = (end_handshake - start_handshake) * 1000 + delay_ms  # ms
 
-            # Extract AES key
-            key_b64 = ack_data[4:]
-            aes_key = base64.b64decode(key_b64)
-
-            # Measure RTT with an encrypted health request
+            # ── Measure RTT with encrypted health request ──
             start_rtt = time.perf_counter()
 
             request_data = {
                 "action": "health",
-                "nonce": str(uuid.uuid4()),  # Unique nonce for probing
-                "timestamp": time.time()     # Current timestamp
+                "nonce": str(uuid.uuid4()),
+                "timestamp": time.time(),
+                "hash": ""  # Will be filled below
             }
+            
+            # Calculate hash
+            data_copy = dict(request_data)
+            data_copy.pop("hash", None)
+            request_data["hash"] = hashlib.sha256(
+                json.dumps(data_copy, sort_keys=True).encode()
+            ).hexdigest()
+            
             request_bytes = json.dumps(request_data).encode("utf-8")
             aesgcm = AESGCM(aes_key)
             nonce = os.urandom(12)
-            ciphertext = aesgcm.encrypt(nonce, request_bytes, None)
+            aad = b"session-bound-data"
+            ciphertext = aesgcm.encrypt(nonce, request_bytes, aad)
             encrypted = nonce + ciphertext
 
             # Send length-prefixed encrypted message
@@ -176,7 +225,7 @@ class NetworkProber:
             # Decrypt response
             resp_nonce = encrypted_response[:12]
             resp_ciphertext = encrypted_response[12:]
-            plaintext = aesgcm.decrypt(resp_nonce, resp_ciphertext, None)
+            plaintext = aesgcm.decrypt(resp_nonce, resp_ciphertext, aad)
 
             end_rtt = time.perf_counter()
             rtt = (end_rtt - start_rtt) * 1000 + delay_ms  # ms

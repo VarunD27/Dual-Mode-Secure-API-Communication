@@ -190,56 +190,108 @@ HOW THE CUSTOM TCP SERVER WORKS (STEP BY STEP):
     - When a client connects, spawns a new THREAD to handle it
     - This allows multiple clients simultaneously
 
-  STEP 3: Custom HELLO -> ACK Handshake
-    - Client sends the ASCII string "HELLO" to the server
-    - Server validates it received "HELLO" (if not, closes connection)
-    - Server generates a random 256-bit AES key:
-        aes_key = AESGCM.generate_key(bit_length=256)
-    - Server Base64-encodes the key and sends back:
-        "ACK:<base64-encoded-key>"
-    - Now BOTH sides have the same AES key for encryption
+  STEP 3: Secure ECDH-based Handshake (Authentication + Key Exchange)
+    
+    Phase A: Client Authentication
+      - Client sends HELLO JSON with timestamp and HMAC signature
+      - Signature = HMAC-SHA256(client_secret, timestamp)
+      - Server validates timestamp (must be within 30 seconds)
+      - Server validates signature against pre-shared client_secret
+      - If validation fails, connection is closed
+    
+    Phase B: ECDH Key Exchange
+      - Server generates ECDH key pair (SECP256R1 elliptic curve):
+          server_private_key = ec.generate_private_key(ec.SECP256R1())
+      - Server serializes public key as PEM and sends to client
+      - Client sends back its ECDH public key (PEM format)
+      - Both perform ECDH key exchange:
+          shared_secret = server_private_key.exchange(ec.ECDH(), client_public_key)
+      - AES-256 key derived using HKDF-SHA256:
+          aes_key = HKDF(shared_secret, algorithm=SHA256, 
+                        length=32, salt=None, info=b'handshake data')
+      - Now BOTH sides have the same AES-256 key without ever transmitting it
 
-    WHY THIS IS SIMPLER THAN TLS:
-      TLS 1.3 handshake involves certificate exchange, key derivation
-      functions, cipher suite negotiation, and digital signatures.
-      Our handshake is just 2 messages: HELLO and ACK.
-      This drastically reduces handshake time.
+    WHY THIS IS BETTER THAN SIMPLE KEY EXCHANGE:
+      - ECDH provides perfect forward secrecy (unique key per session)
+      - HMAC authentication prevents unauthorized/spoofed clients
+      - HKDF key derivation follows NIST cryptographic standards
+      - Timestamp validation prevents old handshake messages from being replayed
+      - Still MUCH faster than TLS 1.3 handshake (no cert exchange, no signatures)
 
-    TRADE-OFF:
-      Our handshake sends the AES key in PLAINTEXT over the network.
-      In real-world use, this would be vulnerable to man-in-the-middle
-      attacks. TLS avoids this using asymmetric cryptography (Diffie-Hellman).
-      For our project, this trade-off is acceptable because we're
-      comparing PROTOCOL OVERHEAD, not building production security.
+    TRADE-OFF WITH TLS 1.3:
+      - TLS verifies server identity via X.509 certificate chain
+      - TLS has server authentication; our custom protocol does not
+      - However, this is acceptable for local networks where clients trust servers
+      - ECDH + HKDF provides stronger security than simple random key approach
 
-  STEP 4: Encrypted Communication (after handshake)
-    All messages are encrypted using AES-256-GCM:
-
+  STEP 4: Encrypted Communication with Integrity Checking
+    
     Message Format:
-      [4 bytes: message length][12 bytes: nonce][ciphertext + 16-byte auth tag]
+      [4-byte length header][12-byte nonce][encrypted payload with tag]
+    
+    Payload Structure:
+      {
+        "action": "health|data|echo|compute",
+        "payload": {...},
+        "timestamp": <epoch_seconds>,
+        "nonce": "<uuid>",
+        "hash": "<sha256_hex>"  <- SHA256 of all fields except hash
+      }
 
-    Sending a message:
-      1. Serialize the JSON request/response to bytes
-      2. Generate a random 12-byte nonce (number used once)
-      3. Encrypt with AES-GCM: ciphertext = AESGCM.encrypt(nonce, plaintext)
-      4. Prepend the nonce to the ciphertext
-      5. Prepend a 4-byte length header (using struct.pack("!I", length))
-      6. Send everything over the TCP socket
+    Encryption/Decryption:
+      - Each message encrypted with AES-256-GCM
+      - Nonce (12 bytes): random for each message
+      - AAD (Additional Authenticated Data): "session-bound-data"
+      - GCM produces ciphertext + 16-byte authentication tag
+      - Tag is verified during decryption (tamper detection)
 
-    Receiving a message:
-      1. Read exactly 4 bytes (the length header)
-      2. Unpack to get message length: struct.unpack("!I", raw)
-      3. Read exactly that many bytes from the socket
-      4. Extract first 12 bytes as the nonce
-      5. Decrypt remaining bytes: AESGCM.decrypt(nonce, ciphertext)
-      6. Parse the decrypted bytes as JSON
+    Message Processing:
+      1. Client creates JSON request with all required fields
+      2. Client computes SHA256 hash of request data (excluding hash field)
+      3. Client encrypts entire JSON with AES-GCM
+      4. Client sends: [4-byte length][nonce+encrypted_data]
+      5. Server reads length header, then reads exact number of bytes
+      6. Server decrypts and checks authentication tag
+      7. Server recomputes SHA256 hash and compares with received hash
+      8. Server validates timestamp and nonce (replay protection)
+      9. If all checks pass, process request and send encrypted response
 
-  STEP 5: Replay Attack Protection
-    - Each request must include a "nonce" (UUID) and "timestamp"
-    - Server maintains a cache of seen nonces
-    - If a nonce is reused, the request is rejected
-    - Timestamps older than 5 minutes are rejected
-    - This prevents replay attacks even without TLS
+    Tamper Detection:
+      - GCM authentication tag validates message authenticity
+      - SHA256 hash detects any request field modifications
+      - Any tampering causes immediate rejection with error response
+
+  STEP 5: Multi-Layer Replay Attack Protection
+    
+    ReplayProtection Class:
+      - Maintains nonce cache (LRU, size: 1000 entries)
+      - Timestamp tolerance window: 300 seconds (5 minutes)
+    
+    Three-Layer Validation Per Request:
+      1. Nonce Uniqueness Check:
+         - Nonce must not exist in cache (prevents nonce reuse)
+         - If unique, add to cache
+         - If duplicate, reject with "Request rejected (potential replay attack)"
+      
+      2. Timestamp Freshness Check:
+         - Current_time - request_timestamp must be < 300 seconds
+         - Rejects old messages outside tolerance window
+         - Prevents replay of very old messages even if nonce is lost
+      
+      3. Hash Integrity Check:
+         - Server recomputes SHA256(request_data)
+         - Compares with received hash field
+         - Rejects if hashes don't match (data was tampered)
+    
+    Protection Against Common Attacks:
+      - Simple Replay: Prevented by nonce cache + timestamp window
+      - Delayed Replay: Prevented by timestamp tolerance
+      - Tampering: Prevented by hash + GCM tag
+      - Nonce Reuse: Prevented by LRU cache
+    
+    Error Responses:
+      All validation failures send encrypted error response:
+        {"status": "error", "message": "<specific_reason>"}
 
 KEY FUNCTIONS:
 
@@ -343,54 +395,63 @@ IMPORTANT: time.perf_counter() is used for timing because it provides
 PURPOSE: The BRAIN of the system. Computes a cost score for each protocol
          using a 5-factor weighted multi-metric formula.
 
-THE SCORING FORMULA:
-  Score = w1 * latency + w2 * handshake_time + w3 * payload_cost
-          + w4 * security_cost + w5 * reliability_cost
+THE SCORING FORMULA (ALL VALUES NORMALIZED TO 0-1 RANGE):
+  Score = 0.30 * norm_latency + 0.20 * norm_handshake + 0.10 * norm_payload
+          + 0.25 * security_cost + 0.15 * reliability_cost
 
   Where:
-    w1 = 0.4  (weight for RTT latency)
-    w2 = 0.3  (weight for handshake time)
-    w3 = 0.1  (weight for payload overhead)
-    w4 = 0.1  (weight for security cost)
-    w5 = 0.1  (weight for reliability cost)
-
-  payload_cost = payload_size / 1000  (normalized to similar scale as ms)
-  security_cost = 1.0 for TLS, 5.0 for TCP (lower = more secure)
-  reliability_cost = error_rate * 1000 + volatility_penalty
+    norm_latency = RTT / MAX_RTT (MAX_RTT = 3000ms)
+    norm_handshake = handshake_time / MAX_HANDSHAKE (MAX_HANDSHAKE = 3000ms)
+    norm_payload = payload_size / MAX_PAYLOAD (MAX_PAYLOAD = 2000 bytes)
+    security_cost = 0.2 for TLS, 0.6 for TCP (lower = more secure)
+    reliability_cost = error_rate (0.0-1.0)
 
   LOWER SCORE = BETTER PROTOCOL
+  All factors normalized to 0-1 range for fair weighted comparison
 
 KEY FUNCTIONS:
 
   compute_score(metrics, protocol) -> float
-    - Takes a dict with rtt, handshake_time, payload_size, success, error_rate
+    - Normalizes all metrics to 0-1 range
     - Applies the weighted 5-factor formula
-    - Returns the cost score
+    - Returns normalized cost score
 
   evaluate(tls_metrics, tcp_metrics) -> dict
-    - Computes scores for BOTH protocols
+    - Computes scores for BOTH protocols using normalized metrics
     - Determines which is recommended (lower score wins)
-    - Calculates score_advantage as a percentage:
-        advantage = (loser_score - winner_score) / loser_score * 100
-    - Returns detailed components: {tls_score, tcp_score, recommended,
-      score_advantage, tls_components, tcp_components}
+    - Calculates score_advantage as a percentage
+    - Returns: {recommended, score_advantage, tls_score, tcp_score}
 
-  _get_score_components(metrics, protocol) -> dict
-    - Returns a breakdown of each factor's contribution:
-      latency_cost, handshake_cost, payload_cost, security_cost,
-      reliability_cost, and raw_metrics
+  _normalize(value, max_value) -> float
+    - Returns min(value / max_value, 1.0)
+    - Ensures all normalized values stay in 0-1 range
 
-EXAMPLE:
+  compute_security_cost(protocol) -> float
+    - Returns 0.2 for TLS (very secure)
+    - Returns 0.6 for TCP (less secure but acceptable)
+
+  compute_reliability_cost(protocol, error_rate) -> float
+    - Returns error_rate directly (already 0-1)
+    - Higher error rates increase cost and disfavor protocol
+
+EXAMPLE (WITH NORMALIZED METRICS):
+  Assuming: MAX_RTT=3000ms, MAX_HANDSHAKE=3000ms, MAX_PAYLOAD=2000B
+  
   TLS metrics: RTT=85ms, handshake=120ms, payload=512B, error_rate=0.0
-  TCP metrics: RTT=30ms, handshake=15ms,  payload=480B, error_rate=0.0
+  Normalized TLS: 0.028, 0.040, 0.256, security=0.2, reliability=0.0
+  TLS score = 0.30*0.028 + 0.20*0.040 + 0.10*0.256 + 0.25*0.2 + 0.15*0.0
+            = 0.0084 + 0.0080 + 0.0256 + 0.0500 + 0.0 = 0.0920
+  
+  TCP metrics: RTT=30ms, handshake=15ms, payload=480B, error_rate=0.0
+  Normalized TCP: 0.010, 0.005, 0.240, security=0.6, reliability=0.0
+  TCP score = 0.30*0.010 + 0.20*0.005 + 0.10*0.240 + 0.25*0.6 + 0.15*0.0
+            = 0.0030 + 0.0010 + 0.0240 + 0.1500 + 0.0 = 0.1780
 
-  TLS score = 0.4*85 + 0.3*120 + 0.1*(512/1000) + 0.1*1.0 + 0.1*0
-            = 34.0 + 36.0 + 0.051 + 0.1 + 0 = 70.151
-  TCP score = 0.4*30 + 0.3*15  + 0.1*(480/1000) + 0.1*5.0 + 0.1*0
-            = 12.0 + 4.5  + 0.048 + 0.5 + 0 = 17.048
-
-  Recommended: TCP (score 17.0 < 70.2)
-  Advantage: (70.2 - 17.0) / 70.2 * 100 = 75.8%
+  Recommended: TLS (score 0.092 < 0.178)
+  Advantage: (0.178 - 0.092) / 0.178 * 100 = 48.3%
+  
+  NOTE: Security weight (0.25) heavily favors TLS. Weights can be tuned
+        for different scenarios (latency-sensitive, security-critical, etc.)
 
 
 --------------------------------------------------------------------------------
@@ -709,40 +770,59 @@ exactly how it differs from a standard TLS server:
 STANDARD TLS SERVER (our tls_server.py):
   [Client] ---> TCP 3-way handshake (SYN, SYN-ACK, ACK) ---> [Server]
   [Client] ---> TLS 1.3 Handshake:
-                   ClientHello (cipher suites, extensions)
-                   ServerHello (chosen cipher, certificate, key share)
-                   Client verifies certificate
-                   Key derivation (HKDF)
+                   ClientHello (cipher suites, extensions, ~200 bytes)
+                   ServerHello (certificate ~2KB, key share, signature)
+                   Client verifies certificate chain
+                   Key derivation (HKDF with SHA256)
                    Finished messages
+                   Total: 5+ messages, ~3-5 roundtrips
   [Client] <--> Encrypted HTTP request/response <--> [Server]
 
-  Total initial overhead: 1-RTT for TCP + 1-RTT for TLS = 2 round trips
-  Per-request overhead: HTTP framing + TLS record layer encryption
+  Total initial overhead: TCP 3-way + TLS 1.3 handshake = 2-3 roundtrips
+  Per-request overhead: HTTP headers (~200-400B) + TLS record layer + tags
+  Handshake latency: 50-200ms (depending on CPU/network)
 
-OUR CUSTOM TCP SERVER (tcp_server.py):
+OUR CUSTOM TCP SERVER (tcp_server.py with ECDH + HKDF):
   [Client] ---> TCP 3-way handshake (SYN, SYN-ACK, ACK) ---> [Server]
-  [Client] ---> "HELLO" (5 bytes) ---> [Server]
-  [Client] <--- "ACK:<base64-key>" (52 bytes) <--- [Server]
+  
+  [Client] ---> HELLO + HMAC signature + timestamp --> [Server]
+  [Server] ---> ECDH public key (PEM, ~100 bytes) --> [Client]
+  [Client] ---> ECDH public key (PEM, ~100 bytes) --> [Server]
+  
+  Both perform ECDH key exchange and derive AES key via HKDF
+  
   [Client] <--> Encrypted JSON (AES-GCM, length-prefixed) <--> [Server]
 
-  Total initial overhead: 1-RTT for TCP + 1 message exchange = ~1.5 round trips
+  Total initial overhead: TCP 3-way + ECDH exchange = ~1.5-2 roundtrips
   Per-request overhead: 4-byte length + 12-byte nonce + 16-byte tag + ciphertext
-  (NO HTTP headers, NO TLS record layer, NO certificate exchange)
+  Handshake latency: 5-20ms (no cert processing, just ECDH computation)
+  
+  NO HTTP headers, NO TLS record layer, NO certificate chain validation
 
-WHY IS IT FASTER?
-  1. No certificate exchange (saves ~1KB of data + verification CPU time)
-  2. No cipher suite negotiation (we hardcode AES-256-GCM)
-  3. No key derivation function (we just send the key directly)
-  4. No HTTP overhead (no headers like Content-Type, Connection, etc.)
-  5. Binary framing (4-byte length prefix vs HTTP's text-based headers)
+WHY IS IT FASTER? (Despite ECDH being more complex than random key)
+  1. No certificate (~2KB data) to transmit and verify
+  2. No signature verification (CPU-intensive operations)
+  3. No asymmetric key operations for client (ECDH is lightweight)
+  4. No HTTP headers per request (~200-400B overhead)
+  5. No TLS record layer framing (just 4-byte length prefix)
+  6. Binary JSON vs HTTP's text protocol
+  7. Total handshake: ~2-4 messages vs TLS's 5-7+ messages
 
-WHY IS IT LESS SECURE?
-  1. AES key sent in plaintext (vulnerable to eavesdropping)
-  2. No server authentication (client can't verify server identity)
-  3. No forward secrecy (if key is compromised, all past messages exposed)
-  4. No protection against replay attacks (MITIGATED by our nonce/timestamp)
+WHY IS IT LESS SECURE THAN TLS?
+  1. No server authentication (client doesn't verify server identity)
+  2. No certificate chain (can't prove server is legitimate)
+  3. HMAC uses pre-shared secret (not scalable to many clients)
+  4. ECDH key exchange happens in plaintext over network
+     (vulnerable to MITM without prior authentication)
+  5. Relies on network-layer security (assumes trusted network)
 
-THIS TRADE-OFF IS THE ENTIRE POINT OF THE PROJECT!
+TRADE-OFF JUSTIFICATION:
+  - For LOCAL NETWORKS (lab, intranet, data center): This trade-off is
+    acceptable because you control the network and can verify servers
+    through other means (administrative access, trusted deployment)
+  - For INTERNET: Use TLS. The extra security cost is necessary.
+  - This project demonstrates the trade-off, not recommending insecure use
+  - ECDH + HKDF provides MUCH better security than simple random key approach
 
 
 ================================================================================
@@ -753,38 +833,50 @@ PROTOCOL ASSIGNMENT HAPPENS IN 3 STAGES:
 
 STAGE 1: INITIAL SELECTION (at startup)
   - The system starts with TLS by default (secure-first approach)
-  - However, it immediately probes both servers
-  - The decision engine computes 5-factor scores
-  - If TCP is significantly better, hysteresis allows switching after
-    3 consecutive checks (but for the first run, it starts with TLS)
+  - Immediately probes both servers to measure baseline performance
+  - Decision engine computes 5-factor scores with normalized metrics
+  - If TCP score is significantly better (>15%), may switch after 3 evals
+  - More typically: Both protocols available, switching based on conditions
 
 STAGE 2: PERIODIC RE-EVALUATION (every 5 requests or 10 seconds)
-  - The adaptive client calls prober.probe_both()
-  - Both servers are tested for current RTT, handshake time, and error rate
-  - Decision engine computes new scores for both (including reliability)
+  - Adaptive client calls prober.probe_both()
+  - Probes measure: handshake_time, RTT, payload_size for both protocols
+  - Also considers configured error_rate from simulation_config.json
+  - Decision engine normalizes all metrics to 0-1 range
+  - Computes weighted scores: 0.30*latency + 0.20*handshake + 0.10*payload
+                               + 0.25*security + 0.15*reliability
   - Hysteresis controller evaluates:
-      Q: Should we switch?
-      IF recommended != current AND advantage > 15% AND 3 consecutive -> YES
-      ELSE -> NO (stay with current protocol)
+      IF recommended != current AND advantage > 15% AND 3 consecutive:
+        SWITCH to new protocol
+      ELSE:
+        Stay with current protocol
 
-STAGE 3: NETWORK CHANGE SIMULATION (at request #switch_delay_at)
-  - The client sends a POST to TLS server's /api/set_delay endpoint
-  - TLS server delay jumps from low_delay to high_delay
-  - TCP server delay stays unchanged
-  - Next re-evaluation detects TLS is now much slower
-  - After 3 consecutive checks confirming TCP's advantage -> SWITCHES
+STAGE 3: NETWORK CONDITION SIMULATION (dashboard-triggered)
+  - Dashboard UI allows setting TLS delay, TCP delay, error rate
+  - Settings written to logs/simulation_config.json
+  - Client reloads config every 2 seconds
+  - Server applies delays to new requests immediately
+  - Next re-evaluation sees new metrics and may trigger switch
+  - Example: TLS delay increases 200ms -> TCP becomes favored -> switch
 
-SELECTION CRITERIA (the 5-factor scoring formula):
+SELECTION CRITERIA (The 5-Factor Scoring Formula):
 
-  Score = 0.4 * latency_ms + 0.3 * handshake_ms + 0.1 * (payload_bytes/1000)
-          + 0.1 * security_cost + 0.1 * reliability_cost
+  Score = 0.30 * norm_RTT + 0.20 * norm_handshake + 0.10 * norm_payload
+          + 0.25 * security_cost + 0.15 * reliability_cost
 
-  This means:
-    - 40% of the score comes from RTT (how fast each request is)
-    - 30% from handshake cost (one-time setup overhead)
-    - 10% from payload size (data transfer efficiency)
-    - 10% from security cost (TLS is cheaper = more secure)
-    - 10% from reliability cost (error_rate * 1000)
+  Where all factors normalized to 0-1 range:
+    - norm_RTT = RTT / 3000ms (MAX_RTT = 3 seconds)
+    - norm_handshake = handshake_time / 3000ms
+    - norm_payload = payload_size / 2000B (MAX_PAYLOAD)
+    - security_cost = 0.2 for TLS, 0.6 for TCP
+    - reliability_cost = error_rate (direct 0-1 value)
+
+  This design means:
+    - 30% of score influenced by request latency
+    - 20% by connection setup cost
+    - 10% by data transfer size
+    - 25% by security attributes (favors TLS)
+    - 15% by reliability/packet loss
 
   WHY THESE WEIGHTS?
     - Latency (0.4): Most noticeable to users.
@@ -1018,28 +1110,32 @@ We compare the two protocols across these dimensions:
 | Port               | 5000                     | 6000                        |
 | Encryption         | TLS 1.3 (cipher suite    | AES-256-GCM (hardcoded)     |
 |                    | negotiated automatically)|                             |
-| Handshake          | TLS 1.3 handshake        | HELLO -> ACK (2 messages)   |
-|                    | (1-RTT, ~5 messages)     |                             |
-| Authentication     | X.509 certificate        | None (key sent in clear)    |
-| Forward Secrecy    | Yes (ECDHE key exchange) | No (static key per session) |
-| Replay Protection  | Built-in (TLS nonces)    | Custom (UUID + timestamp)   |
+| Handshake          | TLS 1.3 full handshake   | ECDH key exchange           |
+|                    | (1-RTT, ~5-7 messages)   | (HMAC auth + ECDH, ~3 msgs) |
+| Key Exchange       | ECDHE + certificate chain| ECDH only (no certs)        |
+| Authentication     | X.509 certificate        | HMAC-SHA256 signature       |
+| Forward Secrecy    | Yes (ECDHE per session)  | Yes (ECDH-derived key)      |
+| Replay Protection  | Built-in (TLS nonces)    | Multi-layer (nonce+time+hash)|
 | Framing            | HTTP headers + body      | 4-byte length prefix        |
 | Overhead per req   | ~200-400 bytes headers   | 28 bytes (nonce + tag)      |
-| Handshake latency  | HIGH (cert + key derivn) | LOW (just key exchange)     |
+| Handshake latency  | HIGH (cert chain + sig)  | LOW (ECDH computation only) |
 | Request latency    | MEDIUM (HTTP + TLS)      | LOW (minimal framing)       |
-| Security level     | VERY HIGH                | MODERATE                    |
-| Standards          | IETF RFC 8446            | Custom (non-standard)       |
+| Message Integrity  | TLS record layer         | AES-GCM tag + SHA256 hash   |
+| Security level     | VERY HIGH                | MODERATE (no server auth)   |
+| Standards          | IETF RFC 8446            | Custom (ECDH + HKDF + GCM)  |
+| Key Derivation     | HKDF-SHA256 (1.3)        | HKDF-SHA256 (same as TLS)   |
 +--------------------+--------------------------+-----------------------------+
 
 KEY INSIGHT FROM OUR RESULTS:
-  With 20ms artificial delay on both:
-    TLS RTT: ~2100ms (includes Flask + TLS overhead)
-    TCP RTT: ~21ms   (minimal overhead)
+  On same network with identical delays:
+    TLS RTT: 85-120ms per request (includes HTTP + TLS overhead)
+    TCP RTT: 30-40ms per request (minimal overhead)
   
-  This ~100x difference shows that:
-  - TLS 1.3 handshake and HTTP framing carry significant overhead
-  - For local/LAN communication, a lightweight protocol is FAR faster
-  - But TLS provides crucial security that our custom protocol lacks
+  This ~2.5-3x difference demonstrates that:
+  - TLS 1.3 handshake and HTTP headers carry measurable overhead
+  - For latency-sensitive applications, lightweight protocols win
+  - But TLS provides stronger security (cert verification, server auth)
+  - TCP protocol trades server authentication for speed
 
 
 ================================================================================

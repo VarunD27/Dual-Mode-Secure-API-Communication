@@ -388,12 +388,16 @@ function initCharts() {
                     ...commonOptions.plugins.tooltip,
                     callbacks: {
                         footer: (tooltipItems) => {
-                            let total = 0;
+                            // Tooltip items for a stacked bar include each component slice.
+                            // We store *normalized* component contributions (0..1) so the normalized total is the sum.
+                            let normalizedTotal = 0;
                             tooltipItems.forEach((item) => {
-                                total += item.parsed.y || 0;
+                                normalizedTotal += item.parsed.y || 0;
                             });
-                            return `Total Score: ${total.toFixed(2)}`;
+                            normalizedTotal = Math.max(0, Math.min(1, normalizedTotal));
+                            return `Total Score: ${normalizedTotal.toFixed(3)}`;
                         },
+
                     },
                 },
             },
@@ -416,8 +420,60 @@ function initCharts() {
 }
 
 
+// ── Fetch Current Simulation Config ──
+// Global reliability state for consistency across widget + charts during a single poll cycle
+let globalReliabilityScore = 1.0;
+let cachedErrorRate = 0.0;
+
+async function getCurrentErrorRate() {
+    // Fetch error rate from server and update both cached value and global reliability score
+    try {
+        const response = await fetch('/api/get-settings');
+        if (response.ok) {
+            const data = await response.json();
+            console.log('[Dashboard] Raw API response:', data);
+            
+            // API returns: { success: true, settings: { error_rate: X, tls_delay_ms: Y, tcp_delay_ms: Z } }
+            const settings = data.settings || data;
+            const errorRate = settings.error_rate;
+            
+            console.log('[Dashboard] Fetched error_rate from server:', errorRate);
+            if (typeof errorRate === 'number') {
+                cachedErrorRate = errorRate;
+                globalReliabilityScore = 1 - errorRate;
+                globalReliabilityScore = Math.max(0, Math.min(1, globalReliabilityScore));
+                console.log('[Dashboard] Updated cachedErrorRate:', cachedErrorRate, 'globalReliabilityScore:', globalReliabilityScore);
+                return errorRate;
+            }
+        } else {
+            console.warn('[Dashboard] API response not ok, status:', response.status);
+        }
+    } catch (err) {
+        console.warn('[Dashboard] Failed to fetch current error rate:', err.message);
+    }
+    console.log('[Dashboard] Using cached error rate:', cachedErrorRate);
+    return cachedErrorRate;
+}
+
+// Update global reliability score and widget immediately
+async function updateReliabilityFromServer() {
+    const errorRate = await getCurrentErrorRate();
+    globalReliabilityScore = 1 - errorRate;
+    globalReliabilityScore = Math.max(0, Math.min(1, globalReliabilityScore));
+    const el = document.getElementById('reliability-score');
+    if (el) {
+        const oldValue = el.textContent;
+        el.textContent = globalReliabilityScore.toFixed(3);
+        console.log('[Dashboard] UPDATED reliability widget:', oldValue, '→', globalReliabilityScore.toFixed(3), '(error_rate:', errorRate.toFixed(2), ') | Element found:', !!el);
+    } else {
+        console.warn('[Dashboard] ERROR: reliability-score element NOT FOUND!');
+    }
+    return globalReliabilityScore;
+}
+
+
 // ── Update Dashboard ──
-function updateDashboard(logs) {
+async function updateDashboard(logs) {
     if (!logs || logs.length === 0) return;
 
     const labels = logs.map(l => `#${l.request_id}`);
@@ -475,22 +531,19 @@ function updateDashboard(logs) {
 
         totalRtt += log.rtt_ms;
         
-        // Decision components for breakdown chart — use logged components if available
-        let comp = log.tls_components || log.tcp_components || {};
-        let raw = comp.raw_metrics || {};
-        let latencyCost = comp.latency_cost || (log.rtt_ms * 0.4);
-        let handshakeCost = comp.handshake_cost || (log.handshake_time_ms * 0.3);
-        let payloadCost = comp.payload_cost || (log.payload_size / 1000.0 * 0.1);
-        let securityCost = comp.security_cost || (log.protocol === 'TLS' ? 0.1 : 0.3);
-        let reliabilityCost = comp.reliability_cost || ((raw.error_rate || 0) * 100);
-        
+        // ✅ Get weighted component contributions matching the protocol actually used
+        // Select components for the protocol that was used for this request
+        const comp = log.protocol === 'TLS' ? log.tls_components : log.tcp_components || {};
+        const normalized = comp.normalized || {};
+
         decisionComponents.push({
-            latency: latencyCost,
-            handshake: handshakeCost,
-            payload: payloadCost,
-            security: securityCost,
-            reliability: reliabilityCost
+            latency: normalized.latency || 0,
+            handshake: normalized.handshake || 0,
+            payload: normalized.payload || 0,
+            security: normalized.security || 0,
+            reliability: normalized.reliability || 0
         });
+
     });
 
     const lastLog = logs[logs.length - 1];
@@ -508,18 +561,17 @@ function updateDashboard(logs) {
     document.getElementById('avg-rtt').textContent = `${currentAvgRtt.toFixed(1)}ms`;
     document.getElementById('protocol-switches').textContent = switchCount;
     
-    // Update security and reliability scores from components if available
+    // Update security and reliability scores
     let securityScore = lastLog.protocol === 'TLS' ? 0.100 : 0.300;
-    let reliabilityScore = 1.000;
     
-    if (lastLog.tls_components && lastLog.tls_components.raw_metrics) {
-        reliabilityScore = 1 - lastLog.tls_components.raw_metrics.error_rate;
-    } else if (lastLog.tcp_components && lastLog.tcp_components.raw_metrics) {
-        reliabilityScore = 1 - lastLog.tcp_components.raw_metrics.error_rate;
-    }
-    
+    // globalReliabilityScore is already updated every poll cycle by fetchLogs()
+    // Components are normalized during creation to sum to 1.0
     document.getElementById('security-score').textContent = securityScore.toFixed(3);
-    document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
+    const reliabilityEl = document.getElementById('reliability-score');
+    const oldReliability = reliabilityEl.textContent;
+    reliabilityEl.textContent = globalReliabilityScore.toFixed(3);
+    console.log('[Dashboard] updateDashboard updating reliability:', oldReliability, '→', globalReliabilityScore.toFixed(3));
+
 
     // Update status badge
     const statusDot = document.querySelector('.status-dot');
@@ -574,11 +626,32 @@ function updateDashboard(logs) {
     
     // Decision Component Breakdown - stacked bar chart
     decisionBreakdownChart.data.labels = labels;
-    decisionBreakdownChart.data.datasets[0].data = decisionComponents.map(c => c.latency);
-    decisionBreakdownChart.data.datasets[1].data = decisionComponents.map(c => c.handshake);
-    decisionBreakdownChart.data.datasets[2].data = decisionComponents.map(c => c.payload);
-    decisionBreakdownChart.data.datasets[3].data = decisionComponents.map(c => c.security);
-    decisionBreakdownChart.data.datasets[4].data = decisionComponents.map(c => c.reliability);
+    const latencyData = decisionComponents.map(c => c.latency);
+    const handshakeData = decisionComponents.map(c => c.handshake);
+    const payloadData = decisionComponents.map(c => c.payload);
+    const securityData = decisionComponents.map(c => c.security);
+    const reliabilityData = decisionComponents.map(c => c.reliability);
+    
+    // Debug: Log first few components to verify normalization
+    if (decisionComponents.length > 0) {
+        const first = decisionComponents[0];
+        const sum = first.latency + first.handshake + first.payload + first.security + first.reliability;
+        console.log('[Dashboard] First component normalized values:', {
+            latency: first.latency.toFixed(4),
+            handshake: first.handshake.toFixed(4),
+            payload: first.payload.toFixed(4),
+            security: first.security.toFixed(4),
+            reliability: first.reliability.toFixed(4),
+            total: sum.toFixed(4),
+            globalReliabilityScore: globalReliabilityScore.toFixed(3)
+        });
+    }
+    
+    decisionBreakdownChart.data.datasets[0].data = latencyData;
+    decisionBreakdownChart.data.datasets[1].data = handshakeData;
+    decisionBreakdownChart.data.datasets[2].data = payloadData;
+    decisionBreakdownChart.data.datasets[3].data = securityData;
+    decisionBreakdownChart.data.datasets[4].data = reliabilityData;
     decisionBreakdownChart.update('none');
 
     // ── Update Log Table ──
@@ -627,22 +700,26 @@ async function fetchLogs() {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const logs = await response.json();
 
-    // Update dashboard during normal polling
-    if (logs.length !== previousDataLength) {
-        updateDashboard(logs);
-        previousDataLength = logs.length;
-        
-        // Check for completion if auto-run is active
-        if (isAutoRunning && logs.length > 0) {
-            const lastLog = logs[logs.length - 1];
-            // Check if we've reached 30 requests in the current session
-            if (lastLog.request_id >= 30 && !hasShownCompletionNotification) {
-                showNotification('30 requests completed!', 'success');
-                hasShownCompletionNotification = true;
-                isAutoRunning = false;
+        // ALWAYS update reliability score from server on every poll (even if no new logs)
+        // This ensures the widget persists and charts stay synchronized
+        await updateReliabilityFromServer();
+
+        // Update dashboard charts and stats if there are logs
+        if (logs.length > 0) {
+            await updateDashboard(logs);
+            previousDataLength = logs.length;
+            
+            // Check for completion if auto-run is active
+            if (isAutoRunning) {
+                const lastLog = logs[logs.length - 1];
+                // Check if we've reached 30 requests in the current session
+                if (lastLog.request_id >= 30 && !hasShownCompletionNotification) {
+                    showNotification('30 requests completed!', 'success');
+                    hasShownCompletionNotification = true;
+                    isAutoRunning = false;
+                }
             }
         }
-    }
     } catch (err) {
         // Silently handle errors (server might not be running yet)
         console.debug('Fetch error:', err.message);
@@ -650,8 +727,11 @@ async function fetchLogs() {
 }
 
 // ── Initialize Dashboard ──
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     initCharts();
+    
+    // Initialize reliability score from server immediately (before polling starts)
+    await updateReliabilityFromServer();
     
     // Start polling
     fetchLogs();
@@ -719,33 +799,6 @@ function setupControls() {
             showNotification('Failed to stop auto-run', 'error');
         }
     });
-    
-    // Function to update reliability score card based on current error rate
-    async function updateReliabilityScoreCard() {
-        try {
-            // Try to get from dashboard API first
-            const response = await fetch('/api/get-settings');
-            if (response.ok) {
-                const data = await response.json();
-                const errorRate = data.settings.error_rate || 0.0;
-                const reliabilityScore = 1.0 - errorRate;
-                document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
-                console.log(`[Dashboard] Updated reliability score to ${reliabilityScore.toFixed(3)} (error rate: ${errorRate})`);
-            } else {
-                // Fallback: read directly from simulation config
-                const configResponse = await fetch('/logs/simulation_config.json');
-                if (configResponse.ok) {
-                    const config = await configResponse.json();
-                    const errorRate = config.error_rate || 0.0;
-                    const reliabilityScore = 1.0 - errorRate;
-                    document.getElementById('reliability-score').textContent = reliabilityScore.toFixed(3);
-                    console.log(`[Dashboard] Updated reliability score to ${reliabilityScore.toFixed(3)} (error rate: ${errorRate}) - from config file`);
-                }
-            }
-        } catch (error) {
-            console.error('Failed to update reliability score:', error);
-        }
-    }
 
     // TLS Delay Button
     document.getElementById('apply-tls-delay').addEventListener('click', async () => {
@@ -758,9 +811,10 @@ function setupControls() {
             });
             if (response.ok) {
                 showNotification(`TLS delay set to ${delay}ms`, 'success');
-                // Update reliability score card when delay is applied
-                await updateReliabilityScoreCard();
+                // Sync reliability score immediately after setting params
+                await updateReliabilityFromServer();
             }
+
         } catch (error) {
             showNotification('Failed to set TLS delay', 'error');
         }
@@ -777,9 +831,9 @@ function setupControls() {
             });
             if (response.ok) {
                 showNotification(`TCP delay set to ${delay}ms`, 'success');
-                // Update reliability score card when delay is applied
-                await updateReliabilityScoreCard();
+                await updateReliabilityFromServer();
             }
+
         } catch (error) {
             showNotification('Failed to set TCP delay', 'error');
         }
@@ -797,7 +851,7 @@ function setupControls() {
             if (response.ok) {
                 showNotification(`Error rate set to ${errorRate}%`, 'success');
                 // Update reliability score card when error rate is changed
-                await updateReliabilityScoreCard();
+                await updateReliabilityFromServer();
             }
         } catch (error) {
             showNotification('Failed to set error rate', 'error');
@@ -813,7 +867,9 @@ function setupControls() {
                 document.getElementById('tcp-delay').value = 0;
                 document.getElementById('error-rate').value = 0;
                 showNotification('Network reset to default', 'success');
-                // Reset reliability score card to 1.0 when reset is clicked
+                // Reset reliability score to perfect (1.0) when reset is clicked
+                cachedErrorRate = 0.0;
+                globalReliabilityScore = 1.0;
                 document.getElementById('reliability-score').textContent = '1.000';
                 console.log('[Dashboard] Reset reliability score to 1.000');
             }
@@ -851,6 +907,9 @@ function setupControls() {
                     previousDataLength = 0;
                     hasShownCompletionNotification = false;
                     lastRequestId = 0;
+                    cachedErrorRate = 0.0;
+                    globalReliabilityScore = 1.0;
+                    
                     // Clear all charts
                     if (timelineChart) {
                         timelineChart.data.labels = [];
