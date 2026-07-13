@@ -81,7 +81,8 @@ class DecisionEngine:
         latency_norm = self._normalize(rtt, self.MAX_RTT)
         handshake_norm = self._normalize(handshake, self.MAX_HANDSHAKE)
         payload_norm = self._normalize(payload, self.MAX_PAYLOAD)
-        reliability_norm = 1 - error_rate  # Treat reliability as a benefit (lower error = better)
+        # Treat reliability as a cost: higher error_rate -> worse (higher) score
+        reliability_norm = error_rate
         security_norm = self.compute_security_cost(protocol)
 
         # ✅ FINAL SCORE (0–1 range)
@@ -134,7 +135,8 @@ class DecisionEngine:
         latency_norm = self._normalize(rtt, self.MAX_RTT)
         handshake_norm = self._normalize(handshake, self.MAX_HANDSHAKE)
         payload_norm = self._normalize(payload, self.MAX_PAYLOAD)
-        reliability_norm = 1 - error_rate  # Reliability as a benefit
+        # Reliability is a cost contribution (error_rate 0..1)
+        reliability_norm = error_rate
         security_norm = self.compute_security_cost(protocol)
 
         # ✅ Return WEIGHTED contributions that sum to the total score

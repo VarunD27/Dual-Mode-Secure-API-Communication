@@ -121,6 +121,13 @@ class ManualClient:
         # Evaluate with decision engine
         evaluation = self.engine.evaluate(tls_metrics, tcp_metrics)
         self._last_evaluation = evaluation
+
+        # Store last successful probe results so we can avoid penalizing the other protocol
+        try:
+            if tls_metrics.get("success") and tcp_metrics.get("success"):
+                self._last_probe = {"TLS": tls_metrics, "TCP": tcp_metrics}
+        except Exception:
+            self._last_probe = None
         print(f"   Scores: TLS={evaluation['tls_score']:.1f}, TCP={evaluation['tcp_score']:.1f}")
         print(f"   Advantage: {evaluation['score_advantage']:.1f}%")
         
@@ -188,6 +195,48 @@ class ManualClient:
             
         except Exception as e:
             print(f"❌ Request failed: {e}")
+            # Immediately re-probe and update evaluation so scores reflect this failure,
+            # but only penalize the currently active protocol.
+            try:
+                tls_metrics = self.prober.probe_tls()
+                tcp_metrics = self.prober.probe_tcp()
+
+                failed_proto = self.session.active_protocol
+                other_proto = "TCP" if failed_proto == "TLS" else "TLS"
+
+                # If we have a last successful probe, keep the other protocol unchanged
+                if hasattr(self, '_last_probe') and other_proto in self._last_probe:
+                    if other_proto == "TLS":
+                        tls_metrics = self._last_probe["TLS"]
+                    else:
+                        tcp_metrics = self._last_probe["TCP"]
+
+                # Mark failed protocol as unsuccessful
+                if failed_proto == "TLS":
+                    tls_metrics["success"] = False
+                    tls_metrics["error_rate"] = 1.0
+                else:
+                    tcp_metrics["success"] = False
+                    tcp_metrics["error_rate"] = 1.0
+
+                evaluation = self.engine.evaluate(tls_metrics, tcp_metrics)
+                self._last_evaluation = evaluation
+                print(f"   Immediate re-eval after error: TLS={evaluation['tls_score']:.3f}, TCP={evaluation['tcp_score']:.3f}")
+
+                # Apply hysteresis decision and switch if needed
+                hysteresis_result = self.hysteresis.should_switch(evaluation)
+                if hysteresis_result.get('switch'):
+                    try:
+                        self.session.switch_to(hysteresis_result['protocol'])
+                        print(f"🔄 Switched to {hysteresis_result['protocol']} due to failure")
+                    except Exception as se:
+                        logging.error(f"Failed to switch after error: {se}")
+
+                # Log the failed request with updated scores
+                failed_response = {"_rtt_ms": 0, "_payload_size": 0, "status": "error"}
+                self._log_request(self.session.active_protocol, action, failed_response)
+            except Exception as e2:
+                logging.error(f"Immediate re-eval after failure failed: {e2}")
     
     def show_menu(self):
         """Display the interactive menu."""

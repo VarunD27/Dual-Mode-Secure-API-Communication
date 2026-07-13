@@ -167,6 +167,8 @@ def run_adaptive_client(
     # ── Initial Probe ──
     print("\n[1/3] Probing both servers...")
     probe_results = prober.probe_both()
+    # Keep last successful probe to avoid penalizing the non-failed protocol on errors
+    last_probe_results = probe_results.copy()
 
     if not probe_results["TLS"]["success"]:
         print("[!] TLS server is not reachable. Make sure it's running.")
@@ -228,6 +230,45 @@ def run_adaptive_client(
                     verify=False,
                     timeout=5,
                 )
+                # Also update local simulation_config so NetworkProber sees the change
+                try:
+                    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                    sim_path = os.path.join(project_root, "logs", "simulation_config.json")
+                    sim_cfg = {}
+                    if os.path.exists(sim_path):
+                        with open(sim_path, "r") as sf:
+                            try:
+                                sim_cfg = json.load(sf)
+                            except Exception:
+                                sim_cfg = {}
+                    sim_cfg["tls_delay_ms"] = high_delay
+                    with open(sim_path, "w") as sf:
+                        json.dump(sim_cfg, sf, indent=2)
+                except Exception:
+                    pass
+
+                # Immediately re-probe and re-evaluate so scores reflect new delay
+                try:
+                    probe_results = prober.probe_both()
+                    # Update last_probe_results only if both probes succeeded
+                    if probe_results["TLS"]["success"] and probe_results["TCP"]["success"]:
+                        last_probe_results = probe_results.copy()
+
+                    # Use latest probe results for evaluation
+                    evaluation = engine.evaluate(probe_results["TLS"], probe_results["TCP"])
+                    decision = hysteresis.should_switch(evaluation)
+                    print(f"     Immediate re-eval: TLS RTT={probe_results['TLS']['rtt']:.1f}ms, TCP RTT={probe_results['TCP']['rtt']:.1f}ms")
+                    print(f"     New scores: TLS={evaluation['tls_score']:.3f}, TCP={evaluation['tcp_score']:.3f}, Advantage={evaluation['score_advantage']:.1f}%")
+                    print(f"     Hysteresis: {decision['reason']}")
+                    if decision["switch"]:
+                        print(f"     >>> Immediate switch to {decision['protocol']}")
+                        try:
+                            session.switch_to(decision['protocol'])
+                            last_connected_protocol = None
+                        except Exception as e:
+                            print(f"     [!] Immediate switch failed: {e}")
+                except Exception:
+                    pass
             except Exception:
                 print("     [!] Could not set TLS delay dynamically")
 
@@ -248,7 +289,30 @@ def run_adaptive_client(
         except Exception as e:
             consecutive_errors += 1
             print(f"  [{i:3d}] ERROR: {e} (consecutive: {consecutive_errors})")
-            
+            # Immediately re-probe and re-evaluate to reflect this failed request,
+            # but ensure only the currently running protocol is penalized.
+            try:
+                probe_results = prober.probe_both()
+
+                failed_proto = current_protocol
+                other_proto = "TCP" if failed_proto == "TLS" else "TLS"
+
+                # Replace the non-failed protocol metrics with the last successful probe
+                if last_probe_results and other_proto in last_probe_results:
+                    probe_results[other_proto] = last_probe_results[other_proto]
+
+                # Mark failed protocol as unsuccessful — only set error_rate and success flag.
+                # Avoid forcing extreme RTT/handshake values which dominate the score.
+                if failed_proto in probe_results:
+                    probe_results[failed_proto]["success"] = False
+                    probe_results[failed_proto]["error_rate"] = 1.0
+
+                # Evaluate using modified probe results
+                evaluation = engine.evaluate(probe_results["TLS"], probe_results["TCP"])
+                decision = hysteresis.should_switch(evaluation)
+                print(f"  Immediate re-eval after error: TLS={evaluation['tls_score']:.3f}, TCP={evaluation['tcp_score']:.3f} | {decision['reason']}")
+            except Exception:
+                pass
             # Switch protocol after max consecutive errors
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 other_protocol = "TCP" if current_protocol == "TLS" else "TLS"

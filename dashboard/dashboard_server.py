@@ -54,6 +54,14 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             self._serve_simulation_config()
         else:
             super().do_GET()
+
+    def copyfile(self, source, outputfile):
+        """Copy file contents while ignoring client aborts."""
+        try:
+            super().copyfile(source, outputfile)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # Client closed the connection before the response finished.
+            pass
     
     def do_POST(self):
         """Handle POST requests for control endpoints."""
